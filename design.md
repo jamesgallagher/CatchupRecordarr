@@ -1364,3 +1364,56 @@ diverges from the sections above.)*
   No code written yet — this session was planning only, per the user's
   explicit sequencing ("list this out, then we start the build").
   **Next:** begin Phase A, step 1 (plugin scaffolding).
+
+- **Session 18** (2026-07-05) — Built and verified step 1 (Section 15
+  Phase A): `dispatcharr_recordarr/plugin.py` + `plugin.json`, a minimal
+  `Plugin` class with one `ping` action, following the exact shape
+  `apps/plugins/loader.py` reads (plain class attributes via `getattr`,
+  no required `__init__` args). Also built out repo-based distribution,
+  at the user's request, after verifying Dispatcharr's actual plugin-repo
+  protocol (`apps/plugins/api_views.py`/`models.py`) rather than assuming
+  "paste a GitHub URL" would work — it's a two-file manifest protocol
+  (a registry manifest listing plugins, each pointing to a per-plugin
+  detail manifest with version→download-URL mapping) plus a release zip;
+  confirmed GitHub's automatic tag-archive zip works as-is since the
+  installer walks the whole extracted tree for `plugin.py`/`__init__.py`
+  rather than requiring it at the zip root. Built `manifest.json` and
+  `dispatcharr_recordarr-manifest.json`, pushed to `main`, tagged
+  `v0.1.0`. Hit a real blocker mid-way: the repo was private, so
+  Dispatcharr's unauthenticated fetch would 404 — flagged rather than
+  worked around, user made the repo public, then every URL was
+  re-verified (HTTP 200, correct content, zip contents confirmed to
+  contain `plugin.py` at the expected nested depth) before declaring it
+  done. User then installed the plugin via Settings → Plugins → Add
+  Repository using the manifest URL, enabled it, and successfully ran
+  the `ping` action end-to-end. Step 1 fully verified on a real instance,
+  not just structurally reviewed. **Next:** step 2 (Section 3, archive
+  detection — daily read of `Stream.custom_properties["tv_archive"]`).
+
+- **Session 19** (2026-07-05) — Built step 2 (Section 15 Phase B, Section
+  3): `archive.py` (the actual refresh logic), `tasks.py` (Celery task
+  wrapper), and `plugin.py` now registers a daily periodic task via
+  `core.scheduling.create_or_update_periodic_task` at module-load time,
+  plus a manual "Refresh Now" action for testing. Verified several
+  implementation details against real code before writing anything,
+  rather than assuming: `apps.channels.models.Stream` already has a
+  first-class indexed `stream_id` field (simpler than the URL-parsing
+  approach Sportarr needed), `core.xtream_codes.Client` is an existing,
+  reusable Xtream API client (reused rather than writing raw HTTP calls),
+  and — a real gotcha caught before it became a bug — the normal M3U sync
+  stores `tv_archive`/`tv_archive_duration` as **strings** in
+  `custom_properties` (confirmed via `apps/m3u/tasks.py`'s stream-parsing
+  code), so a bare truthy check would treat `"0"` as True; added
+  `_parse_bool_ish()` to guard against it. Also confirmed `Client`
+  implements the context-manager protocol and fixed the code to use `with`
+  for proper session cleanup, matching Dispatcharr's own call sites.
+  Discussed direct deployment access (user's Dispatcharr runs as an Unraid
+  Docker container) — recommended against giving direct push/SSH access
+  to the live container this early in the build, since the more invasive
+  code (takeover signal, segment downloads) is still ahead; user agreed to
+  keep using the repo-install method. Bumped to v0.2.0 (both manifest
+  files + plugin.json + Plugin.version) since Dispatcharr's UI diffs
+  `latest_version` to show "update available." **Next:** tag and push
+  v0.2.0, user reinstalls/updates via the repo and verifies archive
+  detection against real M3U accounts, then step 3 (SQLite state store
+  schema).
