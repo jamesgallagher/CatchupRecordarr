@@ -960,6 +960,95 @@ than the above provides; not designing this preemptively.
 
 ---
 
+## Section 15 — Build Plan (Iterative Steps) `[ ] NOT STARTED`
+
+Sequenced so each step is a safe pause/resume point — build, verify, stop
+if needed, pick back up next session by pointing at this list and saying
+which step number is next. Ordered by dependency, not by section number;
+each step names the design section(s) it implements.
+
+**Phase A — Scaffolding**
+1. Plugin folder structure + `plugin.json` manifest + minimal `Plugin`
+   class (name/version/description, no real logic yet). Verify: plugin
+   appears, loads, and shows enabled in Dispatcharr's plugin list.
+
+**Phase B — Read-only foundations (safest possible first real features)**
+2. Archive detection (Section 3): daily periodic task reading
+   `Stream.custom_properties["tv_archive"]`/`tv_archive_duration` per
+   `M3UAccount`, logged per Section 14's conventions. Purely read-only,
+   no side effects — easy to verify against known test data.
+3. SQLite state store schema (Section 6): tables/models for per-recording
+   job state, per-segment state, per-`M3UAccount` dialect state (Section
+   8). Schema only at this step — no logic wired to it yet.
+
+**Phase C — Recording takeover (Section 4/5 Part A)**
+4. `post_save` signal receiver on `Recording`: detect catchup-capable
+   channel + future `start_time`, call `revoke_task()`, defensive
+   `if not instance.task_id` check (#11), log clearly. Verify: schedule a
+   test recording on a catchup-capable channel, confirm its native
+   `PeriodicTask` gets deleted.
+5. Status-transition tick (#13): flip taken-over recordings to
+   `"interrupted"` + friendly `interrupted_reason` once `start_time`
+   passes, not at takeover. Verify against the actual frontend badge
+   rendering.
+
+**Phase D — Post-air detection (Section 5 Part B)**
+6. Periodic poll for taken-over recordings whose `end_time` + grace has
+   passed (Section 3's catchup-capable filter, Section 6's "already
+   handled" exclusion). At this step: detect and log only, no download
+   yet — verify the right recordings get picked up before wiring in any
+   network calls.
+
+**Phase E — Provider communication (Section 8)**
+7. Timeshift URL builder: both dialects, invariant-culture date
+   formatting, credential escaping.
+8. User-Agent resolution (`M3UAccount.get_user_agent()`) and provider
+   timezone resolution (`server_info.timezone`), including the
+   `timestamp_now` clock-sanity check from Section 10.
+9. Dialect fallback/retry logic with per-account persisted state
+   (path/php, `consecutive_failures`, self-healing swap on success).
+
+**Phase F — Segmented download (Section 9)**
+10. Segment planning: split a job's window into fixed-size chunks.
+11. Single-segment fetch using steps 7-9's URL/dialect logic, plus the
+    1MB "not ready" threshold check (Section 8).
+12. Segment state machine: `pending → in_progress → completed`/`pending`,
+    5-attempt retry cap, orphan recovery (reset `in_progress` at tick
+    start, Section 9).
+13. Stitching: concatenate completed segments into the final MKV.
+
+**Phase G — Validation (Section 10)**
+14. Post-stitch `ffprobe` duration + playability checks.
+15. Job-level retry cap tied to archive retention; permanent failure
+    marking with reason.
+
+**Phase H — Recording integration (Section 7)**
+16. Update the taken-over `Recording` row in place on success:
+    `custom_properties` shape, `"[Catchup] "` title prefix, merge (not
+    overwrite) to preserve existing markers (#14).
+17. Comskip gating: global `CoreSettings` switch AND plugin's
+    `comskip_enabled_default` setting.
+
+**Phase I — Polish**
+18. Plugin settings fields: `comskip_enabled_default`, grace period,
+    lookback window, any others surfaced along the way.
+19. Logging audit pass: confirm every step above actually followed
+    Section 14's conventions (tags, structured context, no credentials
+    logged) rather than assuming it did while focused on functionality.
+
+**Phase J — Real-world validation**
+20. End-to-end test against a real provider account — this is where
+    Section 9's parked stitch-boundary risk (Section 13) actually gets
+    tested for the first time.
+
+**Natural milestone checkpoints** (good "if I had to stop for a while,
+stop here" points): after step 1 (plugin loads), after step 6 (takeover +
+detection fully working, nothing downloaded yet), after step 13 (a real
+file gets produced), after step 17 (a finished catchup recording is
+fully indistinguishable-but-tagged and playable in Dispatcharr).
+
+---
+
 ## Session Log
 
 *(Append an entry each session — date, what was decided/built, what's next.
@@ -1259,3 +1348,19 @@ diverges from the sections above.)*
   app name, its actual behavior, code citations) left untouched — only
   the framing of *this* project's scope changed. **Next:** design is
   complete, validated, and scoped correctly; ready for scaffolding.
+
+- **Session 17** (2026-07-05) — Added Section 15 (Build Plan), a
+  20-step sequenced implementation plan, at the user's request — they
+  want to build iteratively with clean pause/resume points in case of
+  running out of token budget mid-session. Ordered by dependency: plugin
+  scaffolding, then read-only foundations (archive detection, state
+  store schema) as the safest possible first real steps, then recording
+  takeover, post-air detection, provider communication, segmented
+  download, validation, recording integration, and polish, ending with
+  real-provider testing. Flagged four natural milestone checkpoints
+  (plugin loads / takeover+detection working / a real file gets produced
+  / a finished catchup recording is playable and tagged) as good "stop
+  here for a while" points, not just the fine-grained step boundaries.
+  No code written yet — this session was planning only, per the user's
+  explicit sequencing ("list this out, then we start the build").
+  **Next:** begin Phase A, step 1 (plugin scaffolding).
