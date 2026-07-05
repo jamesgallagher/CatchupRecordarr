@@ -1684,3 +1684,18 @@ diverges from the sections above.)*
   schedule one on a non-capable channel and confirm it records normally.
   Note: a taken-over recording will just sit there unfetched — the
   pipeline that fulfills it is steps 5-16, not built yet.
+
+- **Session 26** (2026-07-05) — User asked whether the TV guide can show
+  which channels are catchup-capable. Answer: no — the guide UI doesn't
+  read `tv_archive`, and a real guide badge would need frontend edits
+  (same plugin-only line as Session 11's recording-badge decision).
+  Added a **"List Catchup Channels"** plugin action instead (v0.9.0):
+  one click returns every channel with a catchup-capable stream on an
+  active XC account, with per-channel archive retention days (max across
+  the channel's streams), first dozen in the toast + full list at INFO
+  in the logs. Doubles as the picker for step 4's takeover test —
+  the user needs a known-capable channel to schedule the throwaway
+  recording on. Step 4 (v0.8.0's takeover receiver) still awaiting its
+  real-instance test; the v0.9.0 update includes it unchanged. **Next:**
+  user updates to v0.9.0, restarts, uses "List" to pick a capable
+  channel, then runs the step 4 takeover test from Session 25's plan.

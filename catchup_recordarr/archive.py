@@ -34,6 +34,40 @@ def stream_is_catchup_capable(stream):
     return _parse_bool_ish(cp.get("tv_archive", 0))
 
 
+def list_catchup_channels():
+    """Every channel with at least one catchup-capable stream on an active
+    XC account, as [(channel_number, name, retention_days), ...] ordered by
+    channel number. Retention is the max across the channel's streams.
+    """
+    from apps.channels.models import Channel
+
+    channels = (
+        Channel.objects.filter(
+            streams__m3u_account__account_type="XC",
+            streams__m3u_account__is_active=True,
+        )
+        .distinct()
+        .prefetch_related("streams")
+        .order_by("channel_number")
+    )
+
+    results = []
+    for channel in channels:
+        capable = False
+        days = 0
+        for s in channel.streams.all():
+            cp = s.custom_properties or {}
+            if _parse_bool_ish(cp.get("tv_archive", 0)):
+                capable = True
+                try:
+                    days = max(days, int(cp.get("tv_archive_duration", 0)))
+                except (TypeError, ValueError):
+                    pass
+        if capable:
+            results.append((channel.channel_number, channel.name, days))
+    return results
+
+
 def refresh_archive_flags():
     """Refresh tv_archive/tv_archive_duration for every active XC account's
     streams. Empty/failed fetch never clears existing flags - a provider

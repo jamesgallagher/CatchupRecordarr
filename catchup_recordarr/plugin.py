@@ -144,6 +144,15 @@ class Plugin:
             ),
             "button_label": "Refresh Now",
         },
+        {
+            "id": "list_catchup_channels",
+            "label": "List Catchup Channels",
+            "description": (
+                "Show which channels support catchup/timeshift and how many days "
+                "of archive each provides. Full list is also written to the logs."
+            ),
+            "button_label": "List",
+        },
     ]
 
     def run(self, action_id, params, context):
@@ -159,6 +168,35 @@ class Plugin:
             return {
                 "status": "ok",
                 "message": f"Catchup Recordarr v{VERSION} is loaded and responding; {store_status}.",
+            }
+
+        if action_id == "list_catchup_channels":
+            from .archive import list_catchup_channels
+
+            channels = list_catchup_channels()
+            if not channels:
+                return {
+                    "status": "ok",
+                    "message": (
+                        "No catchup-capable channels found. Run 'Refresh Archive "
+                        "Flags Now' first, and check the provider is configured "
+                        "as an Xtream Codes account."
+                    ),
+                }
+            for num, name, days in channels:
+                log.info(
+                    "%s catchup-capable: [%s] %s (%sd retention)",
+                    LOG_TAG, num, name, days,
+                )
+            preview = ", ".join(f"{name} ({days}d)" for _, name, days in channels[:12])
+            more = (
+                f" ... and {len(channels) - 12} more (full list in logs)"
+                if len(channels) > 12
+                else ""
+            )
+            return {
+                "status": "ok",
+                "message": f"{len(channels)} catchup-capable channel(s): {preview}{more}",
             }
 
         if action_id == "refresh_archive_flags":

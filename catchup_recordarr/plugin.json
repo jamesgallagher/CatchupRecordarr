@@ -1,6 +1,6 @@
 {
     "name": "Catchup Recordarr",
-    "version": "0.8.0",
+    "version": "0.9.0",
     "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
     "author": "James",
     "help_url": "https://github.com/jamesgallagher/CatchupRecordarr",
@@ -17,6 +17,12 @@
             "label": "Refresh Archive Flags Now",
             "description": "Immediately re-check which channels support catchup/timeshift, instead of waiting for the daily job. Runs synchronously - the button will wait for it to finish.",
             "button_label": "Refresh Now"
+        },
+        {
+            "id": "list_catchup_channels",
+            "label": "List Catchup Channels",
+            "description": "Show which channels support catchup/timeshift and how many days of archive each provides. Full list is also written to the logs.",
+            "button_label": "List"
         }
     ]
 }
