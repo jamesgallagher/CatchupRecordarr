@@ -15,6 +15,7 @@ from django.utils import timezone as django_timezone
 from core.xtream_codes import Client as XtreamClient
 
 from ._version import LOG_TAG
+from .errors import safe_error_string
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +60,13 @@ def resolve_provider_timezone(m3u_account):
         ) as client:
             auth = client.authenticate()
     except Exception as exc:
+        # safe_error_string(), never str(exc) - XtreamClient wraps requests
+        # exceptions that can embed the account's credentials in the
+        # request URL (Section 14).
         logger.warning(
             "%s account '%s': could not authenticate to resolve timezone, "
             "assuming UTC: %s",
-            LOG_TAG, m3u_account.name, exc,
+            LOG_TAG, m3u_account.name, safe_error_string(exc),
         )
         _timezone_cache[m3u_account.id] = tz
         return tz

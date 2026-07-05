@@ -1145,6 +1145,33 @@ copy blindly. Adopt explicitly as a rule for us: log a redacted form
 (host + stream id + time window, credentials masked) if the URL itself
 ever needs to appear in a message, e.g. for the dialect-fallback log line.
 
+**Refinement, Session 35 (real credential leak, v0.16.0): the URL isn't
+the only leak vector — an exception's own `str()` is too.** `redact_timeshift_url()`
+(step 7) covers the case of logging the URL we built ourselves, but a
+real test of "Fetch One Pending Segment Now" hit a provider 404, and
+`requests`' own `HTTPError.__str__()` embeds the *full request URL it
+actually made* — including a real IPTV username and password — directly
+in its string form. `download.py` returned `str(exc)` as the error
+message, which surfaced the plaintext credentials in three places at
+once: the UI action response, Dispatcharr's server logs, and the chat
+transcript used to debug it. `redact_timeshift_url()` never ran, because
+nothing was redacting *this* string — the leak came from the exception
+object, not from our own URL-building code.
+
+Fix: a new `errors.py` module with `safe_error_string(exc)`, which
+returns only the exception's type name plus an HTTP status code if one
+is available (e.g. `"HTTP 404 (HTTPError)"`) — never the exception's own
+`str()`. Every exception handler downstream of a provider-facing HTTP
+call (`download.py`'s `_download()`, `archive.py`'s
+`refresh_archive_flags()`, `provider.py`'s `resolve_provider_timezone()`)
+must go through this helper, never interpolate the raw exception. Local,
+non-network exceptions (`OSError` from disk I/O in `download.py`) are
+unaffected — they never carry the request URL, so showing them directly
+is safe and more useful for debugging. Audited every `except ... as exc`
+in the plugin folder to confirm these were the only three at risk;
+`plugin.py`'s own handler only touches local SQLite state and was
+already safe.
+
 **Optional, not yet needed:** a plugin setting for extra-verbose segment-
 claim/retry detail at DEBUG, independent of Dispatcharr's global log
 level — worth adding only if v1 turns out to need finer-grained tracing
@@ -1953,3 +1980,35 @@ diverges from the sections above.)*
   sane size (well over 1MB, playable). Then step 12 — the actual
   orchestration: claim → fetch → mark completed/retry, with the 5-attempt
   cap and orphan recovery already designed in Section 9.
+
+- **Session 35** (2026-07-05) - User ran "Fetch One Pending Segment Now"
+  against v0.16.0 and hit a real provider 404. The error message returned
+  to the UI action response - and written to Dispatcharr's own server
+  logs, and pasted into this chat - contained the user's actual IPTV
+  username and password in plaintext, because `download.py`'s
+  `_download()` returned bare `str(exc)` on failure, and `requests`'
+  `HTTPError.__str__()` embeds the full request URL it actually made.
+  `redact_timeshift_url()` (built in step 7) never had a chance to run,
+  since the leak came from the exception's own string form, not from
+  logging our constructed URL. Told the user plainly and suggested
+  rotating the provider password. Audited every `except ... as exc`
+  handler in the plugin folder (`grep -n "except.*as exc"` across
+  `*.py`) and found two more instances of the identical risk:
+  `archive.py`'s `refresh_archive_flags()` and `provider.py`'s
+  `resolve_provider_timezone()`, both logging a raw exception from a
+  provider-facing `XtreamClient` call; confirmed `plugin.py`'s own
+  handler was already safe (local SQLite only). Built `errors.py` with
+  `safe_error_string(exc)` - type name + HTTP status only, never
+  `str(exc)` - and applied it in all three places; `download.py` now
+  splits `requests.exceptions.RequestException` (routed through
+  `safe_error_string()`) from local `OSError` (shown directly, since
+  disk I/O errors never carry the request URL). Documented as a
+  permanent rule in Section 14. Bumped to v0.17.0. **Next:** user
+  retests "Fetch One Pending Segment Now" against v0.17.0 and confirms
+  the error message is now a safe classification like
+  `"HTTP 404 (HTTPError)"` with no URL or credentials anywhere in it.
+  Once confirmed, investigate why the fetch 404'd at all - the failing
+  URL didn't match either built dialect format and had extra
+  `token=`/`id=` query params, suggesting `requests` followed a
+  provider-issued redirect to a signed URL rather than our own
+  constructed URL being directly rejected. Then continue to step 12.

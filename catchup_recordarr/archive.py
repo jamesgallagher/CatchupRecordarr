@@ -13,6 +13,7 @@ from apps.m3u.models import M3UAccount
 from core.xtream_codes import Client as XtreamClient
 
 from ._version import LOG_TAG
+from .errors import safe_error_string
 
 logger = logging.getLogger(__name__)
 
@@ -132,9 +133,12 @@ def refresh_archive_flags():
             ) as client:
                 streams = client.get_all_live_streams()
         except Exception as exc:
+            # safe_error_string(), never str(exc) - XtreamClient wraps
+            # requests exceptions that can embed the account's credentials
+            # in the request URL (Section 14).
             logger.warning(
                 "%s account '%s': archive flag refresh failed, keeping existing flags: %s",
-                LOG_TAG, account.name, exc,
+                LOG_TAG, account.name, safe_error_string(exc),
             )
             continue
 

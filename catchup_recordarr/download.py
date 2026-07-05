@@ -17,6 +17,7 @@ import requests
 
 from ._version import LOG_TAG
 from .dialect import fetch_with_fallback
+from .errors import safe_error_string
 from .provider import resolve_user_agent
 from .timeshift import build_timeshift_url
 
@@ -63,12 +64,21 @@ def fetch_segment(m3u_account, stream_id, start_local, duration_minutes, dest_pa
 def _download(url, user_agent, dest_path):
     """Stream url to dest_path via a .part file, atomic rename on
     success so nothing ever sees a partial segment as complete. Never
-    logs the url itself (Section 14) - it embeds real credentials in
-    the path or query string.
+    logs the url itself, and never returns str(exc) for a request
+    failure (Section 14) - both the url and a requests exception's own
+    string form can embed real provider credentials. A real leak of
+    exactly this kind happened during development (Session 35): the
+    exception's default __str__ included the full credentialed URL, and
+    that string was returned all the way to the action's UI response and
+    Dispatcharr's own logs before this fix.
     """
     part_path = dest_path + ".part"
     try:
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    except OSError as exc:
+        return False, f"could not create destination directory: {exc}"
+
+    try:
         with requests.get(
             url,
             headers={"User-Agent": user_agent},
@@ -80,9 +90,16 @@ def _download(url, user_agent, dest_path):
                 for chunk in resp.iter_content(chunk_size=64 * 1024):
                     if chunk:
                         f.write(chunk)
-    except Exception as exc:
+    except requests.exceptions.RequestException as exc:
+        # Never str(exc) here - requests exceptions commonly embed the
+        # full request URL, including credentials.
         _try_delete(part_path)
-        return False, str(exc)
+        return False, safe_error_string(exc)
+    except OSError as exc:
+        # Local I/O error (disk full, permission denied) - safe to show
+        # directly, it never carries the provider URL.
+        _try_delete(part_path)
+        return False, f"local I/O error writing segment: {exc}"
 
     size = os.path.getsize(part_path) if os.path.exists(part_path) else 0
     if size < NOT_READY_THRESHOLD_BYTES:
