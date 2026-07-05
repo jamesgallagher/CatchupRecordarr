@@ -17,7 +17,7 @@ import requests
 
 from ._version import LOG_TAG
 from .dialect import fetch_with_fallback
-from .errors import safe_error_string
+from .errors import describe_redirect_chain, safe_error_string
 from .provider import resolve_user_agent
 from .timeshift import build_timeshift_url
 
@@ -94,7 +94,14 @@ def _download(url, user_agent, dest_path):
         # Never str(exc) here - requests exceptions commonly embed the
         # full request URL, including credentials.
         _try_delete(part_path)
-        return False, safe_error_string(exc)
+        message = safe_error_string(exc)
+        chain = describe_redirect_chain(getattr(exc, "response", None))
+        if chain:
+            # host+path only (query stripped, Section 14) - diagnostic
+            # aid for telling "we built the wrong URL" apart from "the
+            # provider redirected us somewhere that then failed".
+            message = f"{message}: {chain}"
+        return False, message
     except OSError as exc:
         # Local I/O error (disk full, permission denied) - safe to show
         # directly, it never carries the provider URL.

@@ -15,6 +15,8 @@ safe_error_string() instead of str(exc)/%s-formatting the exception
 object directly.
 """
 
+from urllib.parse import urlsplit
+
 
 def safe_error_string(exc):
     """A generic, credential-free description of exc - the exception
@@ -27,3 +29,27 @@ def safe_error_string(exc):
     if status:
         return f"HTTP {status} ({type(exc).__name__})"
     return type(exc).__name__
+
+
+def describe_redirect_chain(response):
+    """A credential-free summary of the request/redirect chain that led
+    to response, e.g. "GET /streaming/timeshift.php -> 302 -> GET
+    /play/timeshift.php -> 404". Host and path only (via urlsplit) -
+    query strings are dropped unconditionally since that's exactly where
+    Xtream credentials and provider tokens live. Diagnostic only: helps
+    tell apart "we built the wrong URL" from "the provider redirected us
+    somewhere that then 404'd" without ever surfacing anything sensitive.
+    """
+    if response is None:
+        return None
+
+    steps = list(response.history) + [response]
+    parts = []
+    for i, resp in enumerate(steps):
+        split = urlsplit(resp.url)
+        parts.append(f"{split.netloc}{split.path}")
+        if i < len(steps) - 1:
+            parts.append(f"-> {resp.status_code} ->")
+        else:
+            parts.append(f"-> {resp.status_code}")
+    return " ".join(parts)

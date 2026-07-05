@@ -2012,3 +2012,31 @@ diverges from the sections above.)*
   `token=`/`id=` query params, suggesting `requests` followed a
   provider-issued redirect to a signed URL rather than our own
   constructed URL being directly rejected. Then continue to step 12.
+
+- **Session 36** (2026-07-05) - v0.17.0 confirmed fixed: retested "Fetch
+  One Pending Segment Now" and got back `Fetch failed: HTTP 404
+  (HTTPError)` - a safe, credential-free classification, no URL anywhere
+  in the UI response or server logs. Turned to the underlying 404 itself:
+  recording 25's segment #0 window is `2026-07-05T10:30:00+00:00` (15m,
+  ~2 hours old at test time) on a channel with 1-day retention - well
+  within the archive window, ruling out "too old" or "not ready yet" as
+  the explanation. Both dialects failed identically (path, then php),
+  which doesn't fit a wrong-dialect-format theory either. The one
+  concrete lead is the URL that leaked pre-fix (Session 35): it was
+  PHP-style but at `/play/timeshift.php` (not the `/streaming/timeshift.php`
+  this plugin builds) with extra `token=`/`id=` query params - the
+  fingerprint of the provider issuing an HTTP redirect from the URL we
+  build to a signed CDN/edge URL, which is what may actually be 404ing.
+  Added `errors.py::describe_redirect_chain()` - given a `requests`
+  response, summarizes the redirect chain as host+path only (query
+  always stripped via `urlsplit`, since that's exactly where credentials
+  and provider tokens live), e.g. `"host/streaming/timeshift.php -> 302
+  -> host2/play/timeshift.php -> 404"`. Wired into `download.py`'s
+  `RequestException` handler so the next real test surfaces this safely.
+  Bumped to v0.17.1. **Next:** user retests "Fetch One Pending Segment
+  Now" once more; the returned error should now show the actual redirect
+  chain (or confirm there isn't one), which will show directly whether
+  this is a redirect-to-a-different-host situation or something else
+  entirely (e.g. a stream/id mismatch, or this specific window genuinely
+  missing from the provider's archive despite being within the retention
+  window).
