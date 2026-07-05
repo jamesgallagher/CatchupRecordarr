@@ -37,7 +37,7 @@ class Plugin:
     """
 
     name = "Catchup Recordarr"
-    version = "0.3.0"
+    version = "0.4.0"
     description = (
         "Detects catchup/timeshift-capable channels and fulfills scheduled "
         "recordings from the provider's archive instead of live capture."

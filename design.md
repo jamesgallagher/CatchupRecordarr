@@ -1441,3 +1441,34 @@ diverges from the sections above.)*
   **Next:** push + tag v0.3.0, verify every manifest URL resolves under
   the new repo name, user does a fresh install (not an update, given the
   slug change) and re-verifies archive detection, then step 3.
+
+- **Session 21** (2026-07-05) — Extended, real debugging session on the
+  user's actual Unraid deployment, root-causing a "Refresh Now" action
+  that kept failing with `celery.worker.consumer.consumer: Received
+  unregistered task ... KeyError` even across multiple full container
+  restarts. Learned real infrastructure detail not previously known: the
+  user's Dispatcharr runs as a single `DISPATCHARR_ENV=aio` container
+  (web + Celery + Beat all bundled via `docker/entrypoint.aio.sh`) with
+  Redis on a separate host, and - discovered from the actual boot log -
+  **two** Celery workers exist (`default@...` on the `celery` queue,
+  `dvr@...` on a dedicated `dvr` queue), both running Celery Beat. Ruled
+  out several wrong theories in sequence by checking real logs rather
+  than assuming: not a stale/non-restarted worker (confirmed via a
+  genuinely fresh boot sequence, GPU checks and all); not a missing
+  `worker_ready` discovery hook (confirmed `dispatcharr/celery.py:45-51`
+  exists and both workers logged `Discovered 1 plugin(s)` cleanly before
+  going `ready.`, in the correct order, no exceptions); not a queue
+  routing mismatch (task correctly targets the `celery` queue, matching
+  the `default` worker). Landed on the most likely remaining explanation:
+  our task used `@shared_task`, which lazily binds to "whichever Celery
+  app is current" - designed for library code reused across multiple
+  app instances - while our plugin is loaded through the dynamic
+  `importlib.util.spec_from_file_location` mechanism rather than a normal
+  package import, a combination not exercised by core Dispatcharr's own
+  (working) `@shared_task`-based periodic task. Changed `tasks.py` to
+  bind directly to Dispatcharr's own concrete `Celery` app object
+  (`from dispatcharr.celery import app as celery_app; @celery_app.task(...)`)
+  instead, removing the indirection. Bumped to v0.4.0. **Not yet
+  confirmed working** - this is a plausible, testable fix, not a verified
+  one; next step is the user retesting "Refresh Now" against v0.4.0 and
+  reporting back before step 2 can be marked complete.
