@@ -1,0 +1,16 @@
+{
+    "name": "DispatcharrRecordarr",
+    "version": "0.1.0",
+    "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
+    "author": "James",
+    "help_url": "https://github.com/jamesgallagher/DispatcharrRecordarr",
+    "fields": [],
+    "actions": [
+        {
+            "id": "ping",
+            "label": "Ping",
+            "description": "Verify the plugin is loaded and responding.",
+            "button_label": "Ping"
+        }
+    ]
+}
