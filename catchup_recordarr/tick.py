@@ -1,21 +1,24 @@
-"""Status-transition tick - resolves open question #13.
+"""Status-transition tick (#13) + post-air detection (Section 5 Part B).
 
-Flips a taken-over Recording's status to "interrupted" (+ a friendly
-reason) once start_time has passed, so the native UI stops showing a
-misleading "Recording" badge. Confirmed on the real deployment
-(recording 24) that the badge is purely time-based
-(start <= now < end, RecordingCard.jsx) - it has no way to know a
-plugin cancelled the native capture, so without this it looks
-indistinguishable from an actual live recording in progress.
+Two checks on one shared schedule, folded into a single thread
+deliberately (noted as a TODO when step 5 was built standalone, done now
+that step 6 exists):
 
-Standalone thread for now (step 5). Step 6 (Section 5 Part B, the
-post-air poll) should fold this into the same tick that detects
-"program finished" rather than run two separate schedulers.
+1. Flip a taken-over Recording's status to "interrupted" (+ a friendly
+   reason) once start_time has passed, so the native UI stops showing a
+   misleading "Recording" badge. Confirmed on the real deployment that
+   the badge is purely time-based (start <= now < end, RecordingCard.jsx)
+   - it has no way to know a plugin cancelled the native capture.
+
+2. Detect when a taken-over recording's window has closed (+ grace) and
+   log that it's ready for a catchup fetch. Detection/logging only for
+   now - the actual download pipeline is steps 7-16, not built yet.
 """
 
 import logging
 import threading
 import time
+from datetime import timedelta
 
 from django.db import close_old_connections
 from django.utils import timezone
@@ -24,6 +27,7 @@ from apps.channels.models import Recording
 
 from . import state
 from ._version import LOG_TAG
+from .archive import channel_archive_retention_days
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,13 @@ INTERRUPTED_REASON = (
     "the finished recording from the provider's archive shortly after it "
     "airs, instead of capturing it live."
 )
+
+# Sportarr-matching default (Section 5) - buffer after end_time before
+# treating a window as ready, since the provider's archive needs time to
+# finalize the tail of the broadcast. Hardcoded for now, same reasoning
+# as Section 8's "not ready" threshold: add a setting only if real-world
+# testing shows it needs tuning.
+GRACE_PERIOD = timedelta(minutes=15)
 
 _tick_started = False
 _tick_lock = threading.Lock()
@@ -68,12 +79,58 @@ def _mark_interrupted_if_due():
         )
 
 
+def _check_post_air_ready():
+    now = timezone.now()
+    recording_ids = state.non_terminal_job_recording_ids()
+    if not recording_ids:
+        return
+
+    candidates = Recording.objects.filter(
+        id__in=recording_ids,
+        end_time__lte=now - GRACE_PERIOD,
+    ).select_related("channel")
+
+    for rec in candidates:
+        retention_days = (
+            channel_archive_retention_days(rec.channel) if rec.channel else 0
+        )
+        if retention_days and rec.end_time < now - timedelta(days=retention_days):
+            # Job-level retention cutoff/permanent-failure handling is
+            # step 15 - not built yet. Log once, don't spam every tick.
+            if not state.get(f"post_air_retention_warned:{rec.id}"):
+                logger.warning(
+                    "%s recording %s: window has aged out of the provider's "
+                    "%sd archive retention before being fetched - job-level "
+                    "retention cutoff/failure handling not built yet (step 15)",
+                    LOG_TAG, rec.id, retention_days,
+                )
+                state.set(f"post_air_retention_warned:{rec.id}", "1")
+            continue
+
+        # Detection only for now - log once per job, not every tick,
+        # since nothing consumes "ready" yet (steps 7-16 aren't built),
+        # so without this a job would otherwise re-log every 60s for as
+        # long as its retention window stays open (potentially days).
+        if state.get(f"post_air_ready_logged:{rec.id}"):
+            continue
+        program = (rec.custom_properties or {}).get("program") or {}
+        logger.info(
+            "%s recording %s ('%s' on channel '%s') ready for catchup fetch "
+            "(window closed %s ago) - detection only, download pipeline not "
+            "built yet (steps 7-16)",
+            LOG_TAG, rec.id, program.get("title", "?"),
+            getattr(rec.channel, "name", "?"), now - rec.end_time,
+        )
+        state.set(f"post_air_ready_logged:{rec.id}", "1")
+
+
 def _tick_loop():
     time.sleep(45)
     while True:
         try:
             close_old_connections()
             _mark_interrupted_if_due()
+            _check_post_air_ready()
         except Exception:
             logger.exception("%s status-transition tick error", LOG_TAG)
         finally:

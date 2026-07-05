@@ -34,6 +34,23 @@ def stream_is_catchup_capable(stream):
     return _parse_bool_ish(cp.get("tv_archive", 0))
 
 
+def channel_archive_retention_days(channel):
+    """Max tv_archive_duration across the channel's catchup-capable
+    streams, 0 if none - the outer edge of Section 5 Part B's lookback
+    window (no point treating a window as fetchable once it's aged out
+    of the provider's own archive retention).
+    """
+    days = 0
+    for s in channel.streams.all():
+        cp = s.custom_properties or {}
+        if _parse_bool_ish(cp.get("tv_archive", 0)):
+            try:
+                days = max(days, int(cp.get("tv_archive_duration", 0)))
+            except (TypeError, ValueError):
+                pass
+    return days
+
+
 def list_catchup_channels():
     """Every channel with at least one catchup-capable stream on an active
     XC account, as [(channel_number, name, retention_days), ...] ordered by

@@ -159,9 +159,10 @@ class Plugin:
             "id": "run_status_tick",
             "label": "Run Status Tick Now",
             "description": (
-                "Immediately flip any taken-over recording that's within its "
-                "original air window to 'interrupted', instead of waiting up to "
-                "60 seconds for the next automatic tick."
+                "Immediately flip any taken-over recording within its air window "
+                "to 'interrupted', and log any recording whose window has closed "
+                "as ready for a catchup fetch (detection only - no download "
+                "pipeline yet), instead of waiting up to 60 seconds."
             ),
             "button_label": "Run Now",
         },
@@ -184,6 +185,7 @@ class Plugin:
 
         if action_id == "run_status_tick":
             tick._mark_interrupted_if_due()
+            tick._check_post_air_ready()
             log.info("%s status tick run manually", LOG_TAG)
             return {"status": "ok", "message": "Status tick complete - check logs for details."}
 

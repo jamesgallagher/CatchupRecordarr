@@ -307,14 +307,30 @@ rather than assuming one was needed:
   stop a capture Celery Beat already dispatched, so anything already
   airing keeps its native live path.
 
-**Part B — post-air poll (periodic tick, unchanged cadence, 5–15 min).**
+**Part B — post-air poll (periodic tick, step 6, built Session 28).**
 Once a `Recording` has been taken over (Part A), the plugin still needs to
-know when to actually pull it from the archive. **Mechanism note, Session
-21:** the tick itself should be the same self-contained background-thread
-approach as Section 3's archive-flag refresh, not a Celery `PeriodicTask`
-— confirmed on a real deployment that plugin-registered Celery tasks
-don't reliably work (Section 2). Not yet built; flagging now so this
-doesn't get built the Celery way and hit the same wall later.
+know when to actually pull it from the archive. Folded into the *same*
+background thread as #13's status-transition tick (`tick.py`) rather than
+a second scheduler, per the TODO left when that thread was first built —
+one 60s-interval thread now does both checks each pass. Not a Celery
+`PeriodicTask` (Section 2's empirical finding: those don't reliably work
+on this deployment).
+
+Query: every non-terminal job (state store) whose `Recording.end_time` is
+at least `GRACE_PERIOD` (15 min, hardcoded — Sportarr-matching default,
+same "don't add a setting pre-emptively" reasoning as Section 8's "not
+ready" threshold) in the past. For each: if the window has already aged
+out of the channel's archive retention (`channel_archive_retention_days`,
+max across the channel's streams), log a warning once and skip — the
+actual retention-based permanent-failure handling is step 15, not built
+yet, this just flags it rather than silently spinning. Otherwise log
+"ready for catchup fetch" **once per job** (deduped via a state-store
+flag) — deliberately not every 60s, since nothing consumes "ready" until
+the download pipeline (steps 7–16) exists, and an un-deduped version
+would spam the same line for as long as the job sits pending, potentially
+days. This section is genuinely **detection only** — no network calls,
+no file writes — confirmed as the intended step-6 scope by the build
+plan itself.
 
 ```
 candidates = Recording.objects.filter(
@@ -1732,3 +1748,26 @@ diverges from the sections above.)*
   "Recording" to "Interrupted" with the friendly reason shown, then
   step 6 (Section 5 Part B — post-air detection, the last piece before
   the "takeover + detection fully working" milestone from Section 15).
+
+- **Session 28** (2026-07-05) — Step 5 fully confirmed on a third,
+  independent recording (25) — takeover fired, and the tick flipped it
+  to `interrupted` 49 seconds after its window opened (well inside the
+  60s design target), logged identically by three of the ~8 processes
+  as expected. Built step 6 (Section 5 Part B): folded post-air
+  detection into the *same* `tick.py` thread rather than a second
+  scheduler, per the TODO already left in the code. Added
+  `channel_archive_retention_days()` to `archive.py` (extracted for
+  reuse, mirrors logic already in `list_catchup_channels`). Detection
+  only, per the build plan's explicit step-6 scope — no network calls.
+  One thing added beyond the original design text: deduped both the
+  "ready for fetch" and "aged out of retention" log lines to fire once
+  per job rather than every 60s, since nothing consumes either yet
+  (steps 7–16, 15) and the original design didn't specify this — an
+  un-deduped version would have spammed identical lines for as long as
+  a job sits pending, potentially days. Bumped to v0.11.0. **Next:**
+  user verifies with a short-retention test (schedule a recording a few
+  minutes out, wait past its end_time + 15min grace, confirm the "ready
+  for catchup fetch" log line and no repeat on subsequent ticks) — this
+  closes out the "takeover + detection fully working, nothing downloaded
+  yet" milestone from Section 15. Then step 7: the timeshift URL builder
+  (Section 8), the first step that talks to the provider.
