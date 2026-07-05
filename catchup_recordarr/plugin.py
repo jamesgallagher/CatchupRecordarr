@@ -176,6 +176,16 @@ class Plugin:
             ),
             "button_label": "Test",
         },
+        {
+            "id": "test_provider_timezone",
+            "label": "Test Provider Timezone Resolution",
+            "description": (
+                "Authenticate to each active Xtream Codes account, resolve its "
+                "reported local timezone, and check its reported clock against "
+                "ours (Section 10). Makes a real request to your provider(s)."
+            ),
+            "button_label": "Test",
+        },
     ]
 
     def run(self, action_id, params, context):
@@ -213,6 +223,33 @@ class Plugin:
             return {
                 "status": "ok",
                 "message": f"path: {path_url}\nphp: {php_url}",
+            }
+
+        if action_id == "test_provider_timezone":
+            from apps.m3u.models import M3UAccount
+
+            from .provider import resolve_provider_timezone
+
+            accounts = list(
+                M3UAccount.objects.filter(account_type=M3UAccount.Types.XC, is_active=True)
+            )
+            if not accounts:
+                return {
+                    "status": "ok",
+                    "message": "No active Xtream Codes accounts found.",
+                }
+            lines = []
+            for account in accounts:
+                tz = resolve_provider_timezone(account)
+                lines.append(f"{account.name}: {tz}")
+                log.info("%s account '%s': resolved timezone %s", LOG_TAG, account.name, tz)
+            return {
+                "status": "ok",
+                "message": (
+                    "\n".join(lines)
+                    + "\n\nCheck logs for a clock-skew warning if the provider's "
+                    "reported clock is unexpectedly far from ours."
+                ),
             }
 
         if action_id == "list_catchup_channels":

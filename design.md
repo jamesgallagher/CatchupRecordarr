@@ -616,6 +616,19 @@ across every provider-facing call including the catchup download) — two
 separate implementations landing on "per-account override, VLC-spoofed
 default" is a good signal this is the right shape, not just a guess.
 
+**Built, Session 31 (step 8):** `provider.py` — `resolve_user_agent()`
+(thin wrapper around the call above) and `resolve_provider_timezone()`,
+which authenticates once per `M3UAccount` and caches the resolved
+`ZoneInfo` in memory for the process lifetime (Sportarr's own approach,
+keyed by server URL there, by account id here — resolving costs an
+auth round-trip and doesn't change between segments or jobs on the same
+account). Section 10's clock-skew check runs at this same point, since
+both come from the same auth response — no reason to authenticate
+twice for two different checks. This is the actual first step that
+talks to the provider over the network (step 7 was pure string
+construction). A manual test action authenticates against every active
+XC account for real and reports the resolved timezone per account.
+
 ---
 
 ## Section 9 — Segmented Download `[~] DECIDED (design only)`
@@ -784,7 +797,9 @@ symptoms instead, using data/tools already in the pipeline:
    job's failure, since every catchup download for that account is
    suspect if this check fails, not just one. Best-effort: skip silently
    if `timestamp_now` is missing or zero rather than treating absence as
-   a failure, since not every panel may report it reliably.
+   a failure, since not every panel may report it reliably. **Built,
+   Session 31 (step 8)** — `provider._check_clock_skew()`, tolerance
+   15 min, runs automatically inside `resolve_provider_timezone()`.
 2. **Per-download duration check** — after stitching, `ffprobe` the final
    file and compare measured duration against the recording's own
    expected window (`end_time - start_time`), tolerance ±5% or ±2
@@ -1815,3 +1830,21 @@ diverges from the sections above.)*
   **Next:** user runs "Test Timeshift URL Builder" and confirms the two
   URLs match Section 8's spec, then step 8 — UA + timezone resolution,
   the actual first provider network call.
+
+- **Session 31** (2026-07-05) — Step 7 confirmed exact byte-for-byte
+  match against Sportarr's fixtures on the real deployment. Built step 8:
+  `provider.py` — `resolve_user_agent()` and `resolve_provider_timezone()`,
+  the latter authenticating once per `M3UAccount` and caching the
+  resolved `ZoneInfo` in memory for the process lifetime. Folded in
+  Section 10's clock-skew check at the same point, since both come from
+  the same auth response. Added a manual test action that authenticates
+  against every active XC account for real (the first action so far that
+  makes genuine provider network calls) and reports the resolved
+  timezone per account. Bumped to v0.13.0. **Next:** user runs "Test
+  Provider Timezone Resolution", confirms a sane timezone comes back
+  (their provider's actual local zone, or UTC if the panel doesn't
+  report one) and no clock-skew warning appears (or, if one does, that
+  it's investigated rather than ignored — it would mean every catchup
+  download on that account is suspect). Then step 9: dialect
+  fallback/retry logic, the last piece of Section 8 before segmented
+  downloading (step 10+) can start.
