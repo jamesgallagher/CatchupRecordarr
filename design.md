@@ -1,14 +1,19 @@
 # DispatcharrRecordarr — Design Document
 
 **Project:** A Dispatcharr plugin that detects IPTV channels supporting
-catchup/timeshift, waits for a scheduled sports program to finish, and
-downloads it from the provider's archive — surfacing the result as a normal,
-fully-functional Dispatcharr recording (watchable, comskip-eligible) rather
-than a bolted-on side feature.
+catchup/timeshift, waits for a scheduled program — anything in the TV
+guide, not a specific content type — to finish, and downloads it from the
+provider's archive — surfacing the result as a normal, fully-functional
+Dispatcharr recording (watchable, comskip-eligible) rather than a
+bolted-on side feature.
 
 **Reference implementation studied:** Sportarr
 (github.com/Sportarr/Sportarr) — a .NET app with an equivalent
-`CatchupDownloadService`. Concepts are ported; no code is shared (different
+`CatchupDownloadService`. Sportarr happens to be sports-focused (its own
+scheduling is built around league/team monitoring), but that's specific to
+*Sportarr*, not to this project — this plugin has no content-type
+restriction of its own; Sportarr was studied purely for its catchup/
+timeshift mechanics. Concepts are ported; no code is shared (different
 stack entirely — Dispatcharr is Django/Celery/Python).
 
 **Target app:** Dispatcharr (github.com/Dispatcharr/Dispatcharr)
@@ -16,8 +21,11 @@ stack entirely — Dispatcharr is Django/Celery/Python).
 **Build strategy:** Plugin-first. No core Dispatcharr changes in v1. This
 was a deliberate choice after establishing that Dispatcharr's existing
 `Recording` model, playback endpoint, and comskip task are all decoupled
-from *how* a recording's file was produced — a plugin can create a real
-`Recording` row and get native playback/comskip for free. See Section 7.
+from *how* a recording's file was produced — a plugin can take over an
+existing native `Recording` row (Section 4/5) and get native
+playback/comskip for free just by updating it in place. See Section 7.
+(Originally the plan was for the plugin to *create* the row itself;
+superseded by Session 6's redesign — see Section 4.)
 
 ---
 
@@ -54,11 +62,12 @@ decides *how* to fulfill it once a catchup-capable channel is involved.
 
 **Non-goals for v1:**
 - No core Dispatcharr code changes (plugin-only).
-- No automatic "is this a sports channel" detection, and no plugin-owned
-  channel curation UI either (Section 4, revised) — the plugin never
-  independently decides what's worth recording; it only acts on channels
-  and programs the user has already told Dispatcharr's native scheduling
-  about.
+- No automatic "is this worth recording" detection by category, name, or
+  any other heuristic, and no plugin-owned channel curation UI either
+  (Section 4, revised) — the plugin never independently decides what's
+  worth recording; it only acts on channels and programs the user has
+  already told Dispatcharr's native scheduling about, whatever those
+  happen to be.
 - No UI changes beyond what the plugin's own settings/actions panel
   provides.
 - No support for non-Xtream (pure M3U) sources — catchup requires Xtream
@@ -139,11 +148,13 @@ revised, Session 6) — there is no separate manual per-channel opt-in
 layered on top anymore. If a channel's `Stream` has `tv_archive > 0`, any
 `Recording` scheduled against it is catchup-eligible.
 
-**Open sub-question `[!]`:** does the plugin read `custom_properties`
-directly at query time (always fresh, more DB hits) or maintain its own
-denormalized cache in its SQLite state store (Section 6)? Leaning toward
-direct read since it's cheap and avoids a second source of truth, but not
-finalized.
+**Resolved, Session 7:** the plugin reads `Stream.custom_properties`
+directly at query time rather than maintaining a denormalized cache in
+Section 6's SQLite — it's cheap (a single indexed ORM lookup, not a
+network call), and avoids a second source of truth that could drift from
+the real M3U sync data between the daily refresh passes. The daily
+refresh job (above) is what keeps `custom_properties` itself current;
+nothing further to cache on top of it.
 
 ---
 
@@ -184,8 +195,9 @@ inventing after all.
 
 **What this removes:**
 - The plugin's own settings-panel channel curation step, entirely.
-- Any risk of the plugin inventing "is this a sports channel" heuristics
-  — moot, since the plugin never decides what's worth recording at all.
+- Any risk of the plugin inventing "is this worth recording" heuristics of
+  its own — moot, since the plugin never decides what's worth recording
+  at all, regardless of content type.
 
 **`comskip_enabled` needs a new home.** The per-channel marker from the
 now-dropped flagging mechanism (`custom_properties["dispatcharr_recordarr"]`)
@@ -262,24 +274,41 @@ candidates = Recording.objects.filter(
 - Program metadata (`title`, `sub_title`, `description`) no longer needs a
   separate EPG lookup at all in the common case — it's already present in
   `Recording.custom_properties["program"]`, populated at creation time by
-  whichever native path created the row (confirmed for Series Rules;
-  needs checking for plain manual scheduling, Section 12).
-- This also means the feature is no longer inherently sports-specific —
-  it now fires for *whatever the user has scheduled* on a catchup-capable
-  channel, sports or not. Scope is entirely a function of what Series
-  Rules / recurring rules / manual recordings the user actually sets up,
-  never enforced by the plugin.
+  whichever native path created the row. **Confirmed, #12/#14:** true for
+  Series Rules, `RecurringRecordingRule` (a synthetic dict, but present),
+  and any manual recording tied to a specific EPG program entry — only
+  genuinely absent for a fully ad-hoc manual recording with no EPG tie at
+  all, covered by the fallback below.
+- This confirms the feature has no content-type restriction of its own —
+  it fires for *whatever the user has scheduled* on a catchup-capable
+  channel, sports, news, or anything else in the guide. Scope is entirely
+  a function of what Series Rules / recurring rules / manual recordings
+  the user actually sets up, never enforced by the plugin.
 
 **Known edge cases (carried over, still not solved in detail):**
 - A `Recording` on a catchup-capable channel whose channel has no
-  `epg_data` link at all → no `custom_properties["program"]` to fall back
-  on either. Fallback behavior still undecided `[!]`.
+  `epg_data` link at all, or a stale EPG source with no matching program
+  for the window → **resolved, Session 10:** since the plugin never
+  decides *whether* to record (Section 4/5) or *when* (`Recording`'s own
+  `start_time`/`end_time`, independent of EPG), a missing/stale EPG link
+  only ever affects the *cosmetic* title/description, never eligibility
+  or timing. Mirrors Dispatcharr's own native fallback convention rather
+  than inventing one — `sync_recurring_rule_impl` already falls back to
+  `rule.name or rule.channel.name` when there's nothing better. Same idea
+  here: if `custom_properties["program"]` is absent (#12) and a direct
+  EPG lookup also comes up empty, synthesize `{"title": f"{channel.name}
+  — {start_time:%Y-%m-%d %H:%M}", "description": "Catchup recording"}`
+  rather than blocking the fetch.
 - Broadcast overruns (real end time later than the scheduled `end_time`)
   → still absorbed by post-padding on the request window, not precise
   overrun detection.
 - Timezone: still must convert to the **provider's** local time (Xtream
   `server_info.timezone`) when building the timeshift URL, never
-  Dispatcharr's or the user's local time.
+  Dispatcharr's or the user's local time. A wrong conversion here is
+  exactly the failure mode Section 10's validation design (Session 13)
+  defends against — at this same resolution point, also cross-check the
+  auth response's `server_info.timestamp_now` against Dispatcharr's own
+  clock; see Section 10 for the full design.
 
 ---
 
@@ -358,13 +387,24 @@ takeover (Section 5, Part A) and a successful catchup fetch, the row's
 status should read as something in-progress/pending, never `completed`
 prematurely.
 
-**Open question `[!]`:** should catchup-sourced recordings be visually
-distinguishable from live-captured ones anywhere in the UI? Currently
-undecided — "indistinguishable from a live recording" was floated as
-possibly the goal, but no final call made. Revisit before wiring this up,
-since it affects whether we need an extra `custom_properties` marker (the
-existing UI won't render an unknown key, so this would need at minimum a
-naming convention, e.g. prefixing the title).
+**Visual distinction (resolved, Session 11): a small `"[Catchup] "` title
+prefix**, e.g. `"[Catchup] Monday Night Football"` — the user wants a
+light "nice to have" tag, kept plugin-only (no core/frontend change).
+Checked both `RecordingCard.jsx` and `RecordingDetailsModal.jsx` first:
+neither has a generic "render any custom property" surface — every
+displayed field (title, `sub_title`, description, stats) is hardcoded to
+a specific key, so there's no way to surface a new marker without editing
+frontend source, which is off the table here (a deliberate, narrower
+constraint than Section 1's general rule — this feature specifically
+stays plugin-only even as a small exception, unlike the badge option
+considered and rejected). Title over `sub_title`: `sub_title` only
+renders when non-empty and is frequently blank (movies, specials, no
+episode info) — using it as the marker would make the tag disappear for
+exactly those recordings and would overwrite a field meant for real
+episode subtitles when one exists. Title always renders. Cost is
+trivial — a single string format at the point the plugin already builds
+`custom_properties["program"]["title"]` (above) — clears the "skip if
+expensive" bar easily.
 
 ---
 
@@ -485,10 +525,24 @@ from the native precedent, not just a labeling nitpick.
 **Segment state machine** (stored in Section 6's SQLite):
 `pending → in_progress → completed`, or on failure, **`in_progress → pending`**
 (not a dead-end `failed` state) — so the same "claim next unclaimed
-segment" logic naturally retries it on the next pass. A per-segment retry
-cap is needed (mirrors the whole-program retry cap / archive-retention-
-expiry cutoff) so one permanently-bad segment doesn't loop forever — exact
-cap value not decided `[!]`.
+segment" logic naturally retries it on the next pass.
+
+**Per-segment retry cap (resolved, Session 9): 5 attempts, hardcoded.**
+No direct Sportarr precedent here — its `MaxAttemptsPerChannel = 4` is a
+whole-job cap (it doesn't segment), a different granularity that doesn't
+port directly. A segment failure only counts once *both* dialects have
+failed (Section 8 — the dialect swap itself is free). No separate backoff
+timer needed on top of the cap: the existing 5-15 min poll cadence
+(Section 5) already spaces retries out naturally, so an explicit backoff
+would be redundant. At that cadence, 5 attempts is roughly 25-75 minutes
+of retrying — enough to survive a transient provider blip, not enough to
+silently grind for hours on one bad chunk. Hardcoded rather than a plugin
+setting, matching Section 8's "not ready" threshold precedent — add
+configuration surface only if real-world testing against a provider shows
+it's needed, not pre-emptively. When the cap is hit, mark the *whole job*
+failed with a specific reason (e.g. "segment 4 of 9 failed after 5
+attempts: `<last error>`"), rather than waiting on the retention-based
+cutoff (Section 10) to eventually notice.
 
 **Turbo mode (concurrent segment downloads) — considered and rejected for
 v1.** Discussed in depth and deliberately dropped, not just deferred for
@@ -519,25 +573,38 @@ Not ruled out forever — worth revisiting only if empirically validated
 against a specific real provider showing genuine per-connection headroom,
 not assumed up front.
 
-**Segment boundary / stitch risk `[!]` (open, newly surfaced — not just a
-turbo-mode concern, applies to sequential segmenting too):** because each
-segment is its own independently-requested archive window rather than a
-provider-delivered keyframe-aligned chunk, consecutive segments aren't
-guaranteed to concatenate cleanly — a dropped frame or brief AV desync at
-the seam is possible where our chosen cut point doesn't land on a
-provider-side keyframe boundary. Candidate mitigations not yet decided:
-small deliberate overlap between segments with trim-at-stitch, or
-accepting the same `-fflags +genpts -avoid_negative_ts make_zero` treatment
-Sportarr applies at remux time (Section 8/10) — note that fixes monotonic
-PTS/discontinuity but does **not** by itself guarantee no dropped frames at
-a non-keyframe cut. Needs real-world testing against an actual provider
-before considering this solved.
+**Segment boundary / stitch risk (parked, Session 14 — see Section 13):**
+not just a turbo-mode concern, applies to sequential segmenting too —
+because each segment is its own independently-requested archive window
+rather than a provider-delivered keyframe-aligned chunk, consecutive
+segments aren't guaranteed to concatenate cleanly, a dropped frame or
+brief AV desync at the seam is possible where our chosen cut point doesn't
+land on a provider-side keyframe boundary. Candidate mitigations (small
+deliberate overlap between segments with trim-at-stitch, or accepting the
+same `-fflags +genpts -avoid_negative_ts make_zero` treatment Sportarr
+applies at remux time, Section 8/10 — which fixes monotonic
+PTS/discontinuity but does **not** by itself guarantee no dropped frames
+at a non-keyframe cut) were identified but not chosen. Deliberately not
+resolved further here — this can't be settled by more design discussion,
+only by testing segment concatenation against a real provider once
+there's an actual build to test. See Section 13.
 
-**Segment-level orphan recovery `[!]` (open, same shape as job-level
-recovery in Section 10):** a segment stuck `in_progress` past some timeout
-(worker died mid-chunk) — auto-requeue after a timeout, or wait for the
-next poll cycle to notice? Not decided; same pattern as the whole-job lock
-TTL below, just applied per-segment.
+**Segment-level orphan recovery (resolved, Session 9): no timeout/TTL —
+reuse the job-level crash-recovery pattern one level deeper.** Sportarr's
+own job-level recovery reasoning (cited in Section 10) is: *"Downloads run
+synchronously inside this tick... a catchup row already in Recording state
+when a tick STARTS can only be a leftover from an app crash/restart
+mid-download"* — no timeout math, just "still in-progress at the start of
+a new tick is unambiguously orphaned." That applies identically to
+segments, since Section 9 already committed to sequential (non-concurrent)
+processing — a job's segments are worked through within one continuous
+task invocation, so a segment can only still be `in_progress` when a *new*
+tick begins if the worker that claimed it crashed or was killed before
+finishing, never because it's "still legitimately working." At the start
+of each periodic tick, before claiming new work, reset any segment found
+`in_progress` back to `pending`. Deliberately not a separate mechanism
+from the job-level one — same idea, applied at both granularities,
+instead of two different recovery strategies doing the same job.
 
 ---
 
@@ -559,20 +626,61 @@ a plugin-owned reimplementation of the same *ideas*):
 - **A hard cap tied to archive retention**: once the requested window falls
   out of the channel's `tv_archive_duration` retention, stop retrying and
   mark the job permanently failed (with reason) rather than retrying
-  forever — mirrors Sportarr's fallback-channel-rotation cutoff logic
-  (note: fallback-channel rotation itself is not yet decided as in/out of
-  scope for our v1 — `[!]` open question).
+  forever. Sportarr pairs this with fallback-channel rotation (retry on a
+  different channel airing the same event); **resolved out of scope for
+  v1, Session 12** — Sportarr can do that because it has its own event
+  database decoupled from any one channel; our plugin has no such concept
+  (a native `Recording` is tied to exactly one channel, and Dispatcharr
+  has no notion of "this program is the same broadcast on another
+  channel"). Building one would mean re-inventing plugin-owned
+  curation — exactly what Session 6 removed. See Section 13 for the
+  future-consideration note.
 - Failure surfaced by setting `custom_properties["status"] = "failed"`
   with a reason string on the taken-over `Recording` row (Section 4/5/7,
   revised Session 6 — no longer a row the plugin created itself) —
   renders correctly through the existing native UI with zero UI changes
   needed, since it's the same field the native pipeline uses.
 
-**Validation against silently-wrong content `[!]` (open, not yet designed):**
-a timezone or scheduling error could result in a "successful" download of
-the *wrong* window (different program) with no hard error. A basic
-sanity check (e.g. comparing final duration to the expected
-`end_time - start_time`) was suggested but not designed in detail.
+**Validation against silently-wrong content (resolved, Session 13).**
+Checked Sportarr's precedent first — it has none: its `MediaFileInspector`
+only runs `ffprobe` for quality/codec scoring, never to validate a
+recording captured the right window, and it parses the Xtream auth
+response's `server_info.timestamp_now` into its client model but never
+actually uses it anywhere. Genuine content validation ("is this really
+the right broadcast") needs video/audio understanding and is out of
+scope; three mechanically-detectable checks catch the realistic failure
+symptoms instead, using data/tools already in the pipeline:
+
+1. **Account-level clock/timezone sanity check** — the one that targets
+   the actual worrying failure mode (a timezone bug producing a
+   technically-successful download of the *wrong* window) directly,
+   rather than a proxy for it. At the same point Section 5 resolves the
+   provider's local timezone from the Xtream auth response
+   (`server_info.timezone`), also compare that response's
+   `server_info.timestamp_now` (present in the API shape, confirmed via
+   Sportarr's own client model — just unused there) against Dispatcharr's
+   own current UTC time. Normal clock drift is seconds to a couple
+   minutes; a timezone-resolution bug shows up as tens of minutes to
+   hours — easily distinguishable. Beyond a ~10-15 min tolerance, log a
+   loud **account-level** warning (Section 14) — distinct from any single
+   job's failure, since every catchup download for that account is
+   suspect if this check fails, not just one. Best-effort: skip silently
+   if `timestamp_now` is missing or zero rather than treating absence as
+   a failure, since not every panel may report it reliably.
+2. **Per-download duration check** — after stitching, `ffprobe` the final
+   file and compare measured duration against the recording's own
+   expected window (`end_time - start_time`), tolerance ±5% or ±2
+   minutes (whichever is larger, to absorb segment-boundary rounding).
+   Catches truncation and silent mid-download data loss; does not alone
+   catch a "right duration, wrong window" shift — check 1 targets that.
+3. **Per-download playability check** — `ffprobe` must successfully parse
+   the file and report at least one valid video stream; a garbled/corrupt
+   result fails this even if size and duration both look fine.
+
+Failures of checks 2/3 are ordinary segment/job failures within the
+existing retry-cap machinery (Sections 9/10) — log both expected and
+actual values for diagnosability, retry since they may be transient.
+Failure of check 1 is systemic — flag the account/source, not one job.
 
 ---
 
@@ -593,22 +701,42 @@ the start of a new session:
 
 1. Read `custom_properties` live vs. cache archive flags in plugin's own
    state store? (Section 3)
-2. Fallback behavior for a catchup-eligible channel with no/stale EPG
-   data? (Section 5)
-3. Should catchup recordings be visually distinguishable from live
-   recordings anywhere in the UI? (Section 7)
+2. ~~Fallback behavior for a catchup-eligible channel with no/stale EPG
+   data?~~ **RESOLVED, Session 10** — only ever affects title/description
+   cosmetics, never eligibility or timing; falls back to the channel name
+   + time window, mirroring Dispatcharr's own native convention
+   (`sync_recurring_rule_impl`). See Section 5.
+3. ~~Should catchup recordings be visually distinguishable from live
+   recordings anywhere in the UI?~~ **RESOLVED, Session 11** — a small
+   `"[Catchup] "` title prefix, plugin-only, no frontend change (a real
+   badge like "Recurring"/"Series" was considered and rejected — it would
+   require editing `RecordingCard.jsx`). See Section 7.
 4. ~~Exact retry/fallback ordering + "not ready yet" detection heuristic for
    the two timeshift URL dialects?~~ **RESOLVED** — see Section 8 (verified
    against Sportarr's shipped source: binary fail/retry-other-dialect,
    1MB threshold, per-`M3UAccount` dialect state).
-5. Per-segment retry cap value? (Section 9)
-6. Segment-level orphan/stuck-in-progress recovery: timeout-based
-   auto-requeue, or wait for next poll? (Section 9)
-7. Is fallback-channel rotation (switching to a different archive-capable
+5. ~~Per-segment retry cap value?~~ **RESOLVED, Session 9** — 5 attempts,
+   hardcoded, no separate backoff (the existing poll cadence already
+   spaces retries). See Section 9.
+6. ~~Segment-level orphan/stuck-in-progress recovery: timeout-based
+   auto-requeue, or wait for next poll?~~ **RESOLVED, Session 9** — no
+   timeout/TTL; reuse Sportarr's own job-level "still in-progress at tick
+   start = orphaned" pattern one level deeper, since segments process
+   sequentially within one tick. See Section 9.
+7. ~~Is fallback-channel rotation (switching to a different archive-capable
    channel after repeated failures, as Sportarr does) in scope for v1, or
-   deferred? (Section 10)
-8. How to validate a "successful" download actually captured the right
-   window/content, not just that ffmpeg exited cleanly? (Section 10)
+   deferred?~~ **OUT OF SCOPE, Session 12** — no data-model equivalent to
+   Sportarr's event database exists in our architecture; would require
+   re-inventing plugin-owned channel curation. Moved to Section 13 as a
+   future consideration rather than a live open question. (Section 10)
+8. ~~How to validate a "successful" download actually captured the right
+   window/content, not just that ffmpeg exited cleanly?~~ **RESOLVED,
+   Session 13** — three mechanical checks, no Sportarr precedent existed
+   for this: an account-level clock/timezone sanity check against the
+   Xtream auth response's `server_info.timestamp_now` (targets the actual
+   risk directly), a per-download `ffprobe` duration check, and a
+   per-download `ffprobe` playability check. See Section 10, cross-
+   referenced from Section 5.
 9. ~~Sportarr's shipped implementation doesn't segment or run concurrent
    catchup downloads at all — how does this reconcile with Section 9's
    segmented + turbo-mode design?~~ **RESOLVED** — deliberate divergence,
@@ -617,34 +745,83 @@ the start of a new session:
    v1 (unproven speed gain, competes with a scarce shared connection
    resource, some panels reject concurrent same-stream connections). See
    Section 9.
-10. **New, from the turbo-mode discussion:** segment boundary/stitch risk
-    — each catchup segment is an independently-requested archive window,
-    not a provider-delivered keyframe-aligned chunk like native HLS
-    segments are, so consecutive segments aren't guaranteed to
-    concatenate cleanly. Mitigation (overlap-and-trim vs. accepting
-    Sportarr's genpts/avoid_negative_ts treatment) not yet decided; needs
-    real-provider testing. (Section 9)
-11. **New, from Session 6's native-scheduling takeover redesign:** must
-    confirm in practice that Dispatcharr's own `schedule_task_on_save`
-    signal receiver (`apps/channels/signals.py`) runs *before* the
-    plugin's own `post_save` receiver on `Recording`, so `task_id` exists
-    yet to revoke at takeover time. Believed true (plugins load after
-    core apps are ready) but not yet verified against a running instance.
-    (Section 5)
-12. **New, Session 6:** does a plain manually-scheduled `Recording` (user
-    clicks "record" on an EPG program directly, not via a Series Rule)
-    also populate `custom_properties["program"]` the same way
-    `evaluate_series_rules_impl` does? If not, Section 5's Part B needs a
-    fallback to a direct EPG lookup for that case. (Section 5)
-13. **New, Session 6:** what `custom_properties["status"]` value should a
-    taken-over `Recording` show between revoke and a successful catchup
-    fetch? Needs a value the native UI renders sensibly (not `"recording"`,
-    since no live capture is actually happening) — not yet decided.
-    (Section 5/7)
-14. **New, Session 6:** confirm `RecurringRecordingRule`-driven recordings
-    end up as plain `Recording` rows the same way Series Rules and manual
-    scheduling do, so the takeover logic in Section 5 applies uniformly
-    without a special case. Likely true, not yet confirmed. (Section 4/5)
+10. **Segment boundary/stitch risk** — each catchup segment is an
+    independently-requested archive window, not a provider-delivered
+    keyframe-aligned chunk like native HLS segments are, so consecutive
+    segments aren't guaranteed to concatenate cleanly. **Parked, Session
+    14** — moved to Section 13, not resolved here: unlike this list's
+    other items, this one can't be settled by more design discussion,
+    only by testing segment concatenation against a real provider once
+    there's something to build against. (Section 9)
+11. ~~Must confirm Dispatcharr's own `schedule_task_on_save` signal
+    receiver runs *before* the plugin's own `post_save` receiver on
+    `Recording`, so `task_id` exists yet to revoke at takeover time.~~
+    **RESOLVED, Session 8** — confirmed via `INSTALLED_APPS`
+    (`dispatcharr/settings.py`): `apps.channels.apps.ChannelsConfig` loads
+    well before `apps.plugins`, and `ChannelsConfig.ready()` connects
+    `schedule_task_on_save` at that point. Plugin discovery (and thus our
+    own receiver registration) happens in `PluginsConfig.ready()` or, for
+    Celery workers, even later at `worker_ready` — strictly after, in
+    every process type. Django dispatches receivers in connection order,
+    so Dispatcharr's receiver is guaranteed to run first, in every case.
+    Defensive coding kept anyway: the plugin's receiver should still check
+    `if not instance.task_id: return` (log a warning) rather than assume,
+    as a clean failure mode if a future Dispatcharr version ever reorders
+    `INSTALLED_APPS`. (Section 5)
+12. ~~Does a plain manually-scheduled `Recording` also populate
+    `custom_properties["program"]` the same way `evaluate_series_rules_impl`
+    does?~~ **RESOLVED, Session 8** — the real dividing line isn't
+    "manual vs. Series Rule," it's whether the recording was tied to a
+    specific EPG program entry at all (`RecordingSerializer.validate()`,
+    `apps/channels/serializers.py:745-805`, gates its pre/post-offset
+    logic on `isinstance(cp.get("program"), dict)` regardless of who
+    created the row). Confirmed further by #14 below: even
+    `RecurringRecordingRule` recordings, which are pure time-window based,
+    get a synthetic `program` dict. So this only comes up empty for a
+    fully ad-hoc manual recording with no EPG tie and no recurring rule
+    behind it — narrower than originally assumed. Section 5 Part B's
+    planned fallback (direct EPG lookup via `_match_epg_program_by_timeslot`,
+    falling back further to just the channel name) already covers this;
+    no design change needed. Also confirmed in passing: this endpoint
+    hard-rejects `end_time < now`, so manual scheduling — like Series
+    Rules — can never target something already aired. (Section 5)
+13. ~~What `custom_properties["status"]` value should a taken-over
+    `Recording` show between revoke and a successful catchup fetch?~~
+    **RESOLVED, Session 8** — checked the actual frontend badge logic
+    (`frontend/src/components/cards/RecordingCard.jsx:104-110, 328-346`).
+    Before `start_time`, the card shows "Scheduled" purely from a time
+    comparison (`isUpcoming = isBefore(now, start)`), regardless of
+    `status` — so nothing needs setting while waiting for air time.
+    During the original broadcast window
+    (`start_time ≤ now < end_time`), leaving `status` unset falsely shows
+    "Recording" (live capture appears to be happening). Of the values
+    that suppress that, `"completed"` is forbidden (Section 7's ordering
+    rule) and `"stopped"` renders even worse (falls through to a
+    "Completed" badge with no file). **Use `"interrupted"`**, set only
+    once `start_time` has passed — not at takeover time, since
+    `isInterrupted` has no time-gating of its own and would show an alarming
+    "Interrupted" badge days before air if set early. Pair it with a
+    friendly `custom_properties["interrupted_reason"]` (the component
+    already has a display slot for this, line 488) — e.g. "Will be
+    fetched from the provider's catchup archive after the broadcast
+    ends" — instead of it reading like an unexplained crash. Implemented
+    as a small addition to Section 5 Part B's existing periodic tick:
+    each pass also flips any taken-over recording whose `start_time` has
+    just passed (but not `end_time`) to this state. (Section 5/7)
+14. ~~Confirm `RecurringRecordingRule`-driven recordings end up as plain
+    `Recording` rows the same way Series Rules and manual scheduling do.~~
+    **RESOLVED, Session 8** — `sync_recurring_rule_impl`
+    (`apps/channels/tasks.py:840-930`) ends with a plain
+    `Recording.objects.create(...)`, the same ORM path (and thus the same
+    `post_save` signal dispatch) as every other creation route. No
+    special case needed in Section 5's takeover logic. Also confirmed:
+    this path sets `custom_properties["status"] = "scheduled"` literally
+    at creation (real precedent for that string, though it doesn't change
+    #13's answer since it's set before `start_time` anyway), and the
+    frontend reads `custom_properties.rule.type === 'recurring'` for its
+    "Recurring" badge — a practical note for later: the plugin must merge
+    `custom_properties` on update, not overwrite it, so it doesn't
+    accidentally strip that marker. (Section 4/5)
 
 ---
 
@@ -653,13 +830,41 @@ the start of a new session:
 Ideas raised and consciously not pursued in v1, kept here so they aren't
 re-litigated from scratch later:
 
-- Auto-detection of "sports" channels by category/name (rejected in favor
-  of manual flagging, Section 4).
+- Auto-detection of "is this channel/program worth recording" by
+  category or name (rejected — Section 1/4; the plugin never makes this
+  call itself, it only acts on what the user has already scheduled via
+  Dispatcharr's native recording features). Note: this item's original
+  wording referenced "manual flagging, Section 4" — that mechanism was
+  dropped entirely in Session 6 in favor of reusing native scheduling;
+  fixed here while already editing this section for unrelated
+  sports-specific wording, Session 16.
 - Native per-channel UI toggle, `capture_method` field on `Recording`,
   scheduler-level integration — all would require core Dispatcharr
   changes; explicitly deferred until the plugin is proven (Section 2).
 - Any core migration for archive flags (currently relying entirely on the
   already-populated `Stream.custom_properties`).
+- **Fallback-channel rotation** (Session 12, from Section 12 #7 /
+  Section 10): Sportarr retries a failed catchup on a different channel
+  airing the same event, using its own event database to know the two
+  channels are related. Not pursued here — Dispatcharr has no concept of
+  "this program is the same broadcast on another channel," and building
+  one would mean re-inventing plugin-owned curation, the exact thing
+  Session 6 removed. Revisit only if this turns out to matter in
+  practice, e.g. if core ever gains an event/broadcast abstraction
+  independent of channel — not worth designing speculatively now.
+- **Segment boundary/stitch risk** (Session 14, from Section 12 #10 /
+  Section 9): different reason for being here than the items above — not
+  a core-change requirement or a rejected idea, just something that can't
+  be settled by more design discussion. Each catchup segment is its own
+  independently-requested archive window, not a provider-delivered
+  keyframe-aligned chunk the way native HLS segments are, so consecutive
+  segments aren't guaranteed to concatenate cleanly at the seam.
+  Candidate mitigations (small overlap-and-trim, or accepting Sportarr's
+  genpts/avoid_negative_ts remux treatment, which helps timestamp
+  continuity but doesn't by itself guarantee no dropped frames at a
+  non-keyframe cut) were identified but not chosen. Revisit once there's
+  an actual plugin build to test segment concatenation against a real
+  provider — this genuinely can't be resolved on paper.
 
 ---
 
@@ -896,3 +1101,161 @@ diverges from the sections above.)*
   resolve early since they underpin whether the takeover mechanism works
   at all; otherwise, per-segment retry cap/orphan recovery (Section 12
   #5/#6), or start scaffolding.
+
+- **Session 7** (2026-07-05) — Reviewed Section 13 (deferred-to-core
+  ideas) at the user's request; noted its item 1 now references the
+  dropped manual-flagging design from Session 6 and is stale, but left it
+  alone for now (user wants to come back to it later, not blocking).
+  Resolved Section 3's last open sub-question: the plugin reads
+  `Stream.custom_properties` directly at query time rather than caching a
+  denormalized copy in Section 6's SQLite. Section 3 (catchup-channel
+  identification) is now fully decided end to end, no open items
+  remaining in that section. **Next:** revisit Section 13's stale
+  cross-reference when convenient; otherwise the Session 6 open questions
+  (#11-14) or per-segment retry cap/orphan recovery (#5/#6) are the
+  highest-value remaining design gaps before scaffolding.
+
+- **Session 8** (2026-07-05) — Worked through open questions #11-14 one
+  at a time, verifying each against actual Dispatcharr backend and
+  frontend source rather than reasoning abstractly. All four resolved,
+  none needed a design change beyond small refinements:
+  - #11: `INSTALLED_APPS` order confirms Dispatcharr's own
+    `schedule_task_on_save` receiver always connects before the plugin's.
+  - #12: whether `custom_properties["program"]` is present depends on
+    "was this tied to an EPG entry," not "manual vs. Series Rule" —
+    narrower edge case than assumed, existing fallback plan already
+    covers it.
+  - #13: use `"interrupted"` + a friendly `interrupted_reason`, but only
+    from `start_time` onward, not at takeover — found by reading the
+    actual frontend badge logic in `RecordingCard.jsx`, which is more
+    time-driven than status-driven than expected.
+  - #14: `RecurringRecordingRule` recordings go through the same
+    `Recording.objects.create()` path, no special case needed; also
+    surfaced that they carry a synthetic `program` dict too (correcting
+    part of #12) and that `custom_properties` must be merged, not
+    overwritten, on update to preserve the frontend's `rule` marker.
+  Section 12 now has zero unresolved items from the Session 6 redesign.
+  **Next:** per-segment retry cap/orphan recovery (Section 12 #5/#6) are
+  the last open items overall, or start scaffolding the plugin.
+
+- **Session 9** (2026-07-05) — Resolved Section 12's remaining
+  Section-9-scoped open questions. #5 (per-segment retry cap): 5
+  attempts, hardcoded, no separate backoff beyond the existing poll
+  cadence — reasoned from scratch since Sportarr has no per-segment
+  precedent (it doesn't segment). #6 (segment orphan recovery): no
+  timeout/TTL mechanism — reuse Sportarr's own job-level "still
+  in-progress when a new tick starts = orphaned" pattern one level
+  deeper, since segments already process sequentially within one
+  continuous tick per Section 9's no-concurrency decision. Both written
+  into Section 9 and Section 12. **Next:** remaining open items are #2
+  (fallback for no/stale EPG data), #3 (should catchup recordings be
+  visually distinguishable in the UI), #7 (is fallback-channel rotation
+  in scope for v1), #8 (validating a download actually captured the
+  right content), and #10 (segment stitch/boundary risk, needs real-
+  provider testing) — plus Section 13's stale cross-reference set aside
+  in Session 7. Otherwise the design is ready to start scaffolding.
+
+- **Session 10** (2026-07-05) — Resolved #2 (fallback for no/stale EPG
+  data): only ever affects title/description cosmetics, never eligibility
+  or timing, since the plugin doesn't decide what/when to record anymore
+  (Session 6) — falls back to channel name + time window, mirroring
+  `sync_recurring_rule_impl`'s own native convention. See Section 5.
+
+- **Session 11** (2026-07-05) — Resolved #3 (visual distinction). User
+  wants a small "Catchup" tag, plugin-only even as an exception, skip if
+  costly. Checked `RecordingCard.jsx` and `RecordingDetailsModal.jsx` —
+  neither has a generic property-rendering surface, and a real badge
+  (matching "Recurring"/"Series") would require editing frontend source,
+  ruled out. Settled on a `"[Catchup] "` title prefix instead — always
+  renders (unlike `sub_title`, often empty), trivial cost, no frontend
+  touch. **Next:** #7 (fallback-channel rotation in scope for v1?), #8
+  (validating catchup content correctness), #10 (segment stitch risk,
+  needs real-provider testing) — plus Section 13's stale cross-reference.
+
+- **Session 12** (2026-07-05) — Resolved #7 (fallback-channel rotation):
+  out of scope for v1, per the user's call — Sportarr can rotate a failed
+  catchup onto a different channel because it has its own event database
+  decoupled from channel; Dispatcharr has no equivalent, and building one
+  would mean re-inventing plugin-owned channel curation, the exact thing
+  Session 6 removed. Moved to Section 13 as a future consideration rather
+  than discarded outright, per the user's request. Section 10 and Section
+  12 updated to match. **Next:** #8 (validating catchup content
+  correctness) and #10 (segment stitch risk, needs real-provider testing)
+  are the last two open design questions; Section 13's stale
+  cross-reference (item 1, from Session 7) is still parked whenever
+  convenient.
+
+- **Session 13** (2026-07-05) — Resolved #8 (validating catchup content
+  correctness), the user's "dive deeper" request. Checked Sportarr's
+  precedent first and found none — its `ffprobe` usage is quality/codec
+  scoring only, and it parses `server_info.timestamp_now` from the Xtream
+  auth response but never uses it; genuinely new design territory, not a
+  port. Landed on three mechanical checks since real content
+  understanding is out of scope: an account-level clock/timezone sanity
+  check comparing `timestamp_now` against Dispatcharr's own clock (targets
+  the actual timezone-bug risk directly, flagged as the most valuable of
+  the three since it's the only one that doesn't just proxy for the real
+  risk), plus per-download `ffprobe` duration and playability checks.
+  Written into Section 10 with a cross-reference from Section 5's
+  timezone-resolution point.
+
+- **Session 14** (2026-07-05) — Parked #10 (segment boundary/stitch risk)
+  in Section 13, at the user's request. Distinct from Section 13's other
+  entries: not a core-change requirement or a rejected idea, just a
+  question that can't be settled by more design discussion — it needs
+  segment concatenation tested against a real provider once there's an
+  actual plugin to test, so labeled clearly to avoid a future reader
+  assuming everything in Section 13 needs a core change. Section 12's
+  list now has zero open items. **Next:** only Section 13's stale
+  cross-reference (item 1, from Session 7) remains parked; the design is
+  otherwise complete and ready for scaffolding.
+
+- **Session 15** (2026-07-05) — Full start-to-finish validation pass at
+  the user's request, given how much shifted across 14 sessions
+  (especially Session 6's architecture change). Read the entire document
+  fresh rather than trusting incremental memory, and re-verified several
+  facts against the actual cloned source rather than assuming prior
+  citations still held (`_match_epg_program_by_timeslot`,
+  `schedule_task_on_save`/`schedule_recording_task` line ranges, the
+  comskip trigger, the `VLC/3.0.20 LibVLC/3.0.20` UA constant,
+  `sync_recurring_rule_impl`'s line number) — all confirmed accurate, no
+  factual drift found. Found and fixed three real internal
+  inconsistencies that were previously missed: (1) the document's own
+  opening "Build strategy" blurb still said the plugin "creates a real
+  Recording row," predating Session 6's switch to updating an existing
+  native row; (2) Section 9's stitch-boundary-risk paragraph still
+  carried an open `[!]` tag and "not yet solved" phrasing after Session
+  14 had already parked it to Section 13 — Section 9's own text was never
+  updated to match; (3) Section 5 still described #12 (program metadata
+  presence) as "needs checking," despite it having been resolved back in
+  Session 8. All three fixed. Reconfirmed Section 13 item 1's stale
+  cross-reference is the one *deliberately* left stale (user's own call,
+  Session 7) — not a new finding. Also surfaced a framing-only
+  observation, not fixed: the document's opening line still describes the
+  goal as downloading "a finished sports program," while Section 5
+  explicitly established the mechanism is no longer sports-specific —
+  left for the user to decide whether the opening line should reflect
+  that. **Next:** the design is validated end to end and ready for
+  scaffolding. Only remaining loose threads are Section 13 item 1 (stale,
+  deliberately parked) and the sports-specific-wording question above,
+  both cosmetic, neither blocking.
+
+- **Session 16** (2026-07-05) — Clarified the project's actual scope:
+  Sportarr was studied purely as a reference implementation for
+  catchup/timeshift *mechanics* — this project itself was never meant to
+  be sports-specific; Sportarr just happens to be a sports app because
+  that's what its own author built it for. Removed sports-specific
+  framing throughout: the opening project blurb, Section 1's non-goals
+  (was "no automatic 'is this a sports channel' detection," now "no
+  automatic 'is this worth recording' detection" — generalized, not just
+  reworded), Section 4's heuristics note, and Section 5's "no longer
+  inherently sports-specific" line (reworded to state plainly that there
+  was never a content-type restriction, rather than implying one was
+  dropped). Also fixed Section 13 item 1's stale cross-reference while
+  already editing that line for the same wording pass — it referenced
+  "manual flagging, Section 4," a mechanism dropped entirely back in
+  Session 6; left alone in Session 7 at the user's request, now fixed
+  since it needed touching anyway. All other `Sportarr` references (the
+  app name, its actual behavior, code citations) left untouched — only
+  the framing of *this* project's scope changed. **Next:** design is
+  complete, validated, and scoped correctly; ready for scaffolding.
