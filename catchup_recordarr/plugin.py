@@ -8,6 +8,7 @@ from django.db import close_old_connections
 
 from . import state
 from . import takeover  # noqa: F401 - connects the Recording post_save receiver (Section 5 Part A)
+from . import tick
 from ._version import LOG_TAG, VERSION
 from .archive import refresh_archive_flags
 
@@ -106,6 +107,7 @@ def _start_scheduler():
 
 
 _start_scheduler()
+tick.start()
 
 
 class Plugin:
@@ -153,6 +155,16 @@ class Plugin:
             ),
             "button_label": "List",
         },
+        {
+            "id": "run_status_tick",
+            "label": "Run Status Tick Now",
+            "description": (
+                "Immediately flip any taken-over recording that's within its "
+                "original air window to 'interrupted', instead of waiting up to "
+                "60 seconds for the next automatic tick."
+            ),
+            "button_label": "Run Now",
+        },
     ]
 
     def run(self, action_id, params, context):
@@ -169,6 +181,11 @@ class Plugin:
                 "status": "ok",
                 "message": f"Catchup Recordarr v{VERSION} is loaded and responding; {store_status}.",
             }
+
+        if action_id == "run_status_tick":
+            tick._mark_interrupted_if_due()
+            log.info("%s status tick run manually", LOG_TAG)
+            return {"status": "ok", "message": "Status tick complete - check logs for details."}
 
         if action_id == "list_catchup_channels":
             from .archive import list_catchup_channels

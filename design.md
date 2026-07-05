@@ -893,6 +893,13 @@ the start of a new session:
     as a small addition to Section 5 Part B's existing periodic tick:
     each pass also flips any taken-over recording whose `start_time` has
     just passed (but not `end_time`) to this state. (Section 5/7)
+    **Built and confirmed on the real deployment, Session 27** — built as
+    its own standalone tick (`tick.py`) for now rather than folded into
+    Part B (which doesn't exist yet); step 6 should merge the two.
+    Confirmed the badge misread was real, not hypothetical: recording 24
+    showed "Recording" in the UI purely because `isTimeActive` had
+    started, despite the native `PeriodicTask` being genuinely deleted
+    (verified via a direct DB check). The fix resolves it.
 14. ~~Confirm `RecurringRecordingRule`-driven recordings end up as plain
     `Recording` rows the same way Series Rules and manual scheduling do.~~
     **RESOLVED, Session 8** — `sync_recurring_rule_impl`
@@ -1699,3 +1706,29 @@ diverges from the sections above.)*
   real-instance test; the v0.9.0 update includes it unchanged. **Next:**
   user updates to v0.9.0, restarts, uses "List" to pick a capable
   channel, then runs the step 4 takeover test from Session 25's plan.
+
+- **Session 27** (2026-07-05) — Step 4 fully verified on the real
+  instance: takeover fired correctly for two independent recordings on
+  two different channels; for the first (recording 23), the user (with
+  root access) directly queried `django_celery_beat_periodictask` via
+  `manage.py shell` and confirmed the native `PeriodicTask` row was
+  genuinely gone — definitive proof `revoke_task()` deleted the
+  schedule, not just that our code ran without an exception. For the
+  second (recording 24, a ~6-minute-out test), the user then reported
+  the UI still showed "Recording" once the window opened. Explained why
+  that's expected (Section 5/7 open question #13's known gap, not a new
+  bug) and used it as the trigger to build step 5: `tick.py`, a
+  standalone background thread (60s interval) that flips a taken-over
+  recording to `status="interrupted"` + a friendly
+  `interrupted_reason` once its window opens, resolving #13. Added
+  `state.non_terminal_job_recording_ids()` to scope the tick to only
+  recordings this plugin actually took over. Added a manual "Run Status
+  Tick Now" action for immediate testing rather than waiting up to 60s.
+  Noted in Section 5/13: this tick is standalone for now: step 6 should
+  fold it into the same tick that detects "program finished" (Section 5
+  Part B) rather than run two separate schedulers long-term. Bumped to
+  v0.10.0. **Next:** user updates, restarts, runs "Run Status Tick Now"
+  (or waits up to 60s) on recording 24, confirms the badge changes from
+  "Recording" to "Interrupted" with the friendly reason shown, then
+  step 6 (Section 5 Part B — post-air detection, the last piece before
+  the "takeover + detection fully working" milestone from Section 15).

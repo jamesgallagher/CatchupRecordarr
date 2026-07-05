@@ -1,6 +1,6 @@
 {
     "name": "Catchup Recordarr",
-    "version": "0.9.0",
+    "version": "0.10.0",
     "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
     "author": "James",
     "help_url": "https://github.com/jamesgallagher/CatchupRecordarr",
@@ -23,6 +23,12 @@
             "label": "List Catchup Channels",
             "description": "Show which channels support catchup/timeshift and how many days of archive each provides. Full list is also written to the logs.",
             "button_label": "List"
+        },
+        {
+            "id": "run_status_tick",
+            "label": "Run Status Tick Now",
+            "description": "Immediately flip any taken-over recording that's within its original air window to 'interrupted', instead of waiting up to 60 seconds for the next automatic tick.",
+            "button_label": "Run Now"
         }
     ]
 }

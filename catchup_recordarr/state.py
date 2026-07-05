@@ -124,6 +124,23 @@ def job_exists(recording_id):
             conn.close()
 
 
+def non_terminal_job_recording_ids():
+    """recording_ids for every job we've taken over that hasn't reached a
+    terminal state yet. 'completed'/'failed' aren't set anywhere yet
+    (Sections 7/10, not built) - filtering them out now anyway so this
+    doesn't need revisiting once those steps land.
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT recording_id FROM jobs WHERE status NOT IN ('completed', 'failed')"
+            ).fetchall()
+            return [r[0] for r in rows]
+        finally:
+            conn.close()
+
+
 def create_job(recording_id):
     """Record a taken-over Recording as a pending catchup job. Idempotent -
     INSERT OR IGNORE preserves existing status/retries if the takeover
