@@ -24,6 +24,11 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR = os.path.join(os.path.dirname(_PLUGIN_DIR), "catchup_recordarr_data")
 _DB_PATH = os.path.join(_DATA_DIR, "state.db")
 
+# Public alias - other modules (download.py) need this to place segment
+# files somewhere that survives a plugin update, same reasoning as
+# state.db itself living outside the plugin folder.
+DATA_DIR = _DATA_DIR
+
 _lock = threading.Lock()
 
 SCHEMA_VERSION = "1"

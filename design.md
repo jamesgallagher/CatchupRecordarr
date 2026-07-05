@@ -603,6 +603,23 @@ hardcoded constant exactly rather than inventing our own number. Not
 exposed as a user setting for now — revisit only if real-world testing
 shows a provider needs a different cutoff.
 
+**Built, Session 34 (step 11):** `download.py`'s `fetch_segment()` — the
+actual HTTP fetch, streamed to a `.part` file with an atomic rename on
+success (nothing ever sees a partial segment as complete), the 1MB
+threshold checked after the stream closes, any HTTP/connection error or
+under-threshold result classified as failure exactly per the algorithm
+above. This is what finally exercises `dialect.fetch_with_fallback()`'s
+injected callback for real, against a real provider — no mocks past this
+point. Segment files land in a sibling data directory
+(`catchup_recordarr_data/segments/{recording_id}/segment_{idx}.ts`),
+same reasoning as `state.db` living outside the plugin folder (Section
+6): survives a plugin update, which a location inside the plugin folder
+would not. Deliberately does **not** update the segment's status in the
+state store yet — that orchestration (claim → fetch → mark
+completed/retry) is step 12; this step only proves the fetch mechanism
+itself works, via a manual action that fetches one real pending segment
+and reports the result without persisting it.
+
 **User-Agent:** resolve via `M3UAccount.get_user_agent().user_agent` —
 the same call Dispatcharr's own live-viewing proxy path uses
 (`apps/proxy/live_proxy/url_utils.py`) — for every outbound request the
@@ -1914,3 +1931,25 @@ diverges from the sections above.)*
   Pending Segments" shows the expected chunks. Then step 11 — the real
   HTTP fetch for a single segment, which is what will finally exercise
   `dialect.fetch_with_fallback()`'s callback for real.
+
+- **Session 34** (2026-07-05) — Step 10 confirmed exactly (1 segment for
+  a 15-min window, 2 for a 30-min window, both correct). Built step 11:
+  `download.py`'s `fetch_segment()` — the real HTTP fetch, `.part` file
+  + atomic rename, 1MB threshold, wired as the `fetch_fn` callback
+  `dialect.fetch_with_fallback()` was built around in step 9 (no mocks
+  past this point). Added `catchup_capable_stream_for_channel()` to
+  `archive.py` (resolves the actual `Stream`, not just a bool, since
+  fetching needs `stream_id`/`m3u_account`) and exposed `state.DATA_DIR`
+  publicly so segment files can live in the same update-surviving
+  sibling directory as `state.db`. Added a "Fetch One Pending Segment
+  Now" manual action — finds the first pending segment across any
+  taken-over job (recordings 25/26 already have some from step 10) and
+  fetches it for real, without updating its status in the state store
+  (that's step 12's job). This is the biggest real-world test in the
+  build so far: genuine bandwidth use against the user's actual
+  provider, a real file written to disk. Bumped to v0.16.0. **Next:**
+  user runs "Fetch One Pending Segment Now" and confirms a real `.ts`
+  file lands in `catchup_recordarr_data/segments/<recording_id>/` with a
+  sane size (well over 1MB, playable). Then step 12 — the actual
+  orchestration: claim → fetch → mark completed/retry, with the 5-attempt
+  cap and orphan recovery already designed in Section 9.

@@ -1,2 +1,2 @@
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 LOG_TAG = f"[Catchup v{VERSION}]"

@@ -1,6 +1,6 @@
 {
     "name": "Catchup Recordarr",
-    "version": "0.15.0",
+    "version": "0.16.0",
     "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
     "author": "James",
     "help_url": "https://github.com/jamesgallagher/CatchupRecordarr",
@@ -53,6 +53,12 @@
             "label": "Test Dialect Fallback Logic",
             "description": "Self-test with mock fetch results (no real provider, no real account touched) verifying the cold-start default, the self-healing flip on a successful fallback, and that a double failure leaves the preference untouched.",
             "button_label": "Test"
+        },
+        {
+            "id": "fetch_test_segment",
+            "label": "Fetch One Pending Segment Now",
+            "description": "REAL download: fetches the first pending segment found across all taken-over jobs from your actual provider, using dialect fallback and the resolved UA/timezone. Does not mark the segment completed (that's step 12) - this is a one-off test of the fetch mechanism itself.",
+            "button_label": "Fetch"
         }
     ]
 }

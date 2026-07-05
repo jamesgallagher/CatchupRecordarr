@@ -34,6 +34,20 @@ def stream_is_catchup_capable(stream):
     return _parse_bool_ish(cp.get("tv_archive", 0))
 
 
+def catchup_capable_stream_for_channel(channel):
+    """The channel's first catchup-capable stream on an active XC account,
+    or None. Same eligibility gate as stream_is_catchup_capable, resolved
+    down to the actual Stream object (not just a bool) - needed once
+    something has to actually fetch from it (stream_id, m3u_account).
+    """
+    for s in channel.streams.filter(
+        m3u_account__account_type="XC", m3u_account__is_active=True
+    ):
+        if stream_is_catchup_capable(s):
+            return s
+    return None
+
+
 def channel_archive_retention_days(channel):
     """Max tv_archive_duration across the channel's catchup-capable
     streams, 0 if none - the outer edge of Section 5 Part B's lookback

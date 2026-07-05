@@ -1,4 +1,5 @@
 import logging
+import os
 import random
 import threading
 import time
@@ -207,6 +208,18 @@ class Plugin:
             ),
             "button_label": "Test",
         },
+        {
+            "id": "fetch_test_segment",
+            "label": "Fetch One Pending Segment Now",
+            "description": (
+                "REAL download: fetches the first pending segment found across "
+                "all taken-over jobs from your actual provider, using dialect "
+                "fallback and the resolved UA/timezone. Does not mark the "
+                "segment completed (that's step 12) - this is a one-off test "
+                "of the fetch mechanism itself."
+            ),
+            "button_label": "Fetch",
+        },
     ]
 
     def run(self, action_id, params, context):
@@ -334,6 +347,67 @@ class Plugin:
 
             log.info("%s dialect fallback self-test: %s", LOG_TAG, " | ".join(results))
             return {"status": "ok", "message": "\n".join(results)}
+
+        if action_id == "fetch_test_segment":
+            from apps.channels.models import Recording
+
+            from .archive import catchup_capable_stream_for_channel
+            from .download import fetch_segment
+            from .provider import resolve_provider_timezone
+
+            target_rid = None
+            target_segment = None
+            for rid in state.non_terminal_job_recording_ids():
+                pending = [s for s in state.get_segments(rid) if s["status"] == "pending"]
+                if pending:
+                    target_rid = rid
+                    target_segment = pending[0]
+                    break
+
+            if not target_rid:
+                return {
+                    "status": "ok",
+                    "message": "No pending segments found - run 'Run Status Tick Now' first to plan some.",
+                }
+
+            rec = Recording.objects.select_related("channel").get(id=target_rid)
+            stream = catchup_capable_stream_for_channel(rec.channel) if rec.channel else None
+            if not stream or not stream.m3u_account or stream.stream_id is None:
+                return {
+                    "status": "ok",
+                    "message": f"Could not resolve a catchup-capable stream/account for recording {target_rid}.",
+                }
+
+            tz = resolve_provider_timezone(stream.m3u_account)
+            start_utc = datetime.fromisoformat(target_segment["start_utc"])
+            start_local = start_utc.astimezone(tz)
+            dest_path = os.path.join(
+                state.DATA_DIR, "segments", str(target_rid),
+                f"segment_{target_segment['idx']:04d}.ts",
+            )
+
+            log.info(
+                "%s test fetch: recording %s segment #%s -> %s (REAL download "
+                "against your provider)",
+                LOG_TAG, target_rid, target_segment["idx"], dest_path,
+            )
+            success, error = fetch_segment(
+                stream.m3u_account, stream.stream_id, start_local,
+                target_segment["duration_minutes"], dest_path,
+            )
+            if success:
+                size = os.path.getsize(dest_path)
+                log.info("%s test fetch succeeded: %s (%d bytes)", LOG_TAG, dest_path, size)
+                return {
+                    "status": "ok",
+                    "message": (
+                        f"Downloaded recording {target_rid} segment #{target_segment['idx']} "
+                        f"to {dest_path} ({size} bytes). Segment status not updated in the "
+                        f"DB - this was a one-off fetch test only (step 12 does that)."
+                    ),
+                }
+            log.warning("%s test fetch failed: %s", LOG_TAG, error)
+            return {"status": "ok", "message": f"Fetch failed: {error}"}
 
         if action_id == "list_catchup_channels":
             from .archive import list_catchup_channels
