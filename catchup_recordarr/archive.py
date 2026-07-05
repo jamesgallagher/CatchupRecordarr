@@ -12,6 +12,8 @@ from apps.channels.models import Stream
 from apps.m3u.models import M3UAccount
 from core.xtream_codes import Client as XtreamClient
 
+from ._version import LOG_TAG
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,15 +49,15 @@ def refresh_archive_flags():
                 streams = client.get_all_live_streams()
         except Exception as exc:
             logger.warning(
-                "[Catchup] account '%s': archive flag refresh failed, keeping existing flags: %s",
-                account.name, exc,
+                "%s account '%s': archive flag refresh failed, keeping existing flags: %s",
+                LOG_TAG, account.name, exc,
             )
             continue
 
         if not streams:
             logger.warning(
-                "[Catchup] account '%s': archive flag refresh returned no streams, keeping existing flags",
-                account.name,
+                "%s account '%s': archive flag refresh returned no streams, keeping existing flags",
+                LOG_TAG, account.name,
             )
             continue
 
@@ -89,7 +91,7 @@ def refresh_archive_flags():
 
         catchup_capable = sum(1 for v in archive_by_stream_id.values() if v[0])
         logger.info(
-            "[Catchup] account '%s': refreshed archive flags, %d stream(s) updated, "
+            "%s account '%s': refreshed archive flags, %d stream(s) updated, "
             "%d catchup-capable of %d total",
-            account.name, updated, catchup_capable, len(archive_by_stream_id),
+            LOG_TAG, account.name, updated, catchup_capable, len(archive_by_stream_id),
         )

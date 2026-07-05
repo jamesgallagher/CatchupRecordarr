@@ -109,11 +109,26 @@ docs). Key findings from Dispatcharr's codebase:
   (`_dvr_build_hls_concat_cmd`). This is a direct precedent for our
   segmented-download-then-stitch approach (Section 8) and confirms MKV
   output is not a compatibility risk.
-- **Plugins have full Django ORM access** and can register their own
-  periodic Celery task via `core.scheduling.create_or_update_periodic_task`
+- **Plugins have full Django ORM access** and, in principle, can register
+  their own periodic Celery task via `core.scheduling.create_or_update_periodic_task`
   (the same mechanism core itself uses for the plugin-repo-refresh
-  feature) — so a plugin can poll on its own schedule without any core
-  hook.
+  feature). **Correction, Session 21 — this doesn't reliably work in
+  practice**, confirmed on a real deployment, not just reasoned about:
+  Dispatcharr's own plugin-discovery-on-`worker_ready` hook
+  (`dispatcharr/celery.py`) fires *after* the Celery Consumer has already
+  built its dispatch table from `app.tasks`, so a task a plugin registers
+  at `worker_ready` time is invisible to that table for the entire life
+  of the worker process — the task publishes fine, but the worker
+  rejects it as unregistered. Confirmed this wasn't about *how* the task
+  was bound (identical failure with `@shared_task` and binding directly
+  to the concrete `dispatcharr.celery.app` instance) — it's a timing gap
+  in when plugin code gets imported relative to when the Consumer
+  snapshots its own dispatch table, not something fixable from plugin
+  code without a core change. **Plugin's own polling still works fine**
+  — just via a self-contained mechanism the plugin fully controls
+  (a background thread + persisted state, Section 3), not Celery's task
+  registry. This affects every section below that assumed "register a
+  periodic Celery task" as the polling mechanism, not just Section 3.
 
 **What plugin-only genuinely costs us** (accepted tradeoffs):
 - No reaction to Dispatcharr's native "EPG just refreshed" trigger for
@@ -139,6 +154,18 @@ docs). Key findings from Dispatcharr's codebase:
   cadence) that re-fetches `get_all_live_streams()` per active `M3UAccount`
   and updates its own cached view of which `Stream`s currently have
   `tv_archive > 0`, plus `tv_archive_duration` (retention window in days).
+  **Mechanism resolved, Session 21** (superseding the original plan to use
+  a Celery `PeriodicTask`, which turned out not to work reliably — see
+  Section 2): a daemon background thread, started once when the plugin
+  module loads, wakes every 30 minutes and checks a "last completed"
+  timestamp persisted in Section 6's SQLite key-value store; runs the
+  refresh if 24+ hours have passed (or it's never run), using a simple
+  claim/timestamp check to avoid every process's own thread piling on at
+  once (best-effort, not a strict lock — a small race window is accepted
+  as low-stakes, worst case a harmless redundant API call). Delays 30s
+  before its first check, mirroring Sportarr's own `CatchupDownloadService`
+  startup delay, since the thread starts during Django's app-loading
+  sequence, before every app is guaranteed finished loading.
 - Empty/failed fetch → do not clear existing flags (provider hiccup should
   not silently downgrade catchup capability — same reasoning Sportarr
   uses).
@@ -258,7 +285,12 @@ rather than assuming one was needed:
 
 **Part B — post-air poll (periodic tick, unchanged cadence, 5–15 min).**
 Once a `Recording` has been taken over (Part A), the plugin still needs to
-know when to actually pull it from the archive:
+know when to actually pull it from the archive. **Mechanism note, Session
+21:** the tick itself should be the same self-contained background-thread
+approach as Section 3's archive-flag refresh, not a Celery `PeriodicTask`
+— confirmed on a real deployment that plugin-registered Celery tasks
+don't reliably work (Section 2). Not yet built; flagging now so this
+doesn't get built the Celery way and hit the same wall later.
 
 ```
 candidates = Recording.objects.filter(
@@ -329,6 +361,14 @@ candidates = Recording.objects.filter(
   "in_progress" as claimed — not just "done vs not done" — to avoid
   double-queuing the same program if a poll fires before the previous pass
   finishes.
+
+**Partially built, Session 21:** a minimal piece of this — a plain
+key-value `get`/`set` over a `state.db` SQLite file at the plugin's own
+folder path — was pulled forward into step 2 (Section 15) ahead of
+schedule, needed to persist the background scheduler's "last completed"
+timestamp once the Celery-task approach was replaced (Section 2/3). The
+full job/segment schema envisioned above still needs building; this is
+just the storage layer it'll sit on top of.
 
 ---
 
@@ -904,11 +944,20 @@ loader's own shared module logger (`apps.plugins.loader`) — not a
 per-plugin one. If our plugin ever uses that handed-in logger directly for
 an action call, its lines are indistinguishable from any other installed
 plugin doing the same in a multi-plugin install. Our own periodic
-Celery-task module (registered per Section 2/5) gets a naturally unique
+background-thread module (Section 2/3) gets a naturally unique
 `__name__`-based logger already, so this mainly matters for action-handler
 code paths — but tag every line either way for consistency and
 grep-ability, rather than depending on which code path happened to produce
 it.
+
+**Refinement, Session 21: include the plugin version in the tag**, e.g.
+`[Catchup v0.5.0]`, sourced from one shared constant (`_version.py`) —
+came directly out of a real debugging session where it was genuinely
+unclear whether a test was exercising newly-pushed code or a still-running
+older version cached in a process's memory (updating plugin files on disk
+doesn't reload code a process already imported; only a restart does).
+Cheap to add, removes that entire class of ambiguity from future
+debugging.
 
 **Structured, greppable context in every message — never a bare string.**
 Both reference implementations do this without exception; make it a hard
@@ -1472,3 +1521,38 @@ diverges from the sections above.)*
   confirmed working** - this is a plausible, testable fix, not a verified
   one; next step is the user retesting "Refresh Now" against v0.4.0 and
   reporting back before step 2 can be marked complete.
+
+- **Session 22** (2026-07-05) — v0.4.0 retested properly this time (a
+  genuine full container restart confirmed first, after almost drawing
+  the wrong conclusion from a test that turned out to not have restarted
+  at all) - identical failure. This ruled out the "which app does the
+  task bind to" theory definitively, confirming the real cause is a
+  timing gap: Dispatcharr's `worker_ready`-triggered plugin discovery
+  (`dispatcharr/celery.py:45-51`) runs *after* the Celery Consumer has
+  already snapshotted its dispatch table from `app.tasks`, so a task
+  registered that late is structurally invisible to the running worker
+  for its entire lifetime - not fixable from plugin code, and would have
+  affected every future Celery task this plugin tried to register (the
+  post-air poll in step 6, not just archive detection). Rebuilt around a
+  self-contained mechanism instead: removed `tasks.py`/the Celery
+  `PeriodicTask` entirely; added `state.py` (a minimal SQLite key-value
+  store, pulling a small piece of Section 6 forward ahead of schedule)
+  and a daemon background thread in `plugin.py` that checks a persisted
+  "last completed" timestamp every 30 minutes and runs the refresh when
+  24+ hours have passed, with a best-effort claim check (not a strict
+  lock) to reduce redundant runs across the multiple processes that each
+  load this plugin independently. Added a 30s startup delay before the
+  thread's first check, mirroring Sportarr's own `CatchupDownloadService`
+  precedent, since Django's app registry isn't guaranteed fully loaded
+  the instant our thread starts. Also added `_version.py` as a single
+  source of truth for the plugin version, now included in every log tag
+  (`[Catchup v0.5.0]`) - directly motivated by this debugging session,
+  where it was genuinely ambiguous whether a test was exercising new code
+  or a stale in-memory copy from before a restart. Updated Section 2's
+  feasibility claim about plugin-registered Celery tasks with this
+  empirical finding, and flagged Section 5 Part B (not yet built) to use
+  the same background-thread approach rather than hitting the same wall
+  later. Bumped to v0.5.0. **Still not confirmed working** - genuinely
+  new territory (self-contained thread instead of Celery), not just a
+  binding tweak this time; next step is the user testing this against
+  their real deployment.
