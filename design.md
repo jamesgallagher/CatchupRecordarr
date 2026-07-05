@@ -659,6 +659,16 @@ if a worker restarts mid-download. It costs nothing extra versus Sportarr
 in terms of provider load — still exactly one connection to the provider
 at a time, same as a whole-file pull.
 
+**Planning built, Session 33 (step 10):** `planning.py`'s `plan_segments()`
+— pure function, splits `[window_start, window_end)` into 15-min chunks,
+final segment shortened to fit exactly. 15 chosen as the concrete default
+(the design text above left it as "15 or 30"). Wired directly into
+`tick.py`'s existing post-air detection (Section 5 Part B, step 6) rather
+than added as a separate mechanism: the first time a ready job is seen,
+its segments are planned and persisted (`segments` table, schema already
+existed from step 3) before the "ready for fetch" line logs. Nothing
+fetches a segment yet — that's step 11.
+
 Native live DVR recording (HLS `.ts` segments concatenated into the final
 MKV, `_dvr_build_hls_concat_cmd`) was cited in earlier drafts as a "direct
 precedent" for this — that framing overstates it. Native HLS segments are
@@ -1884,3 +1894,23 @@ diverges from the sections above.)*
   Fallback Logic" and confirms all three lines show `[PASS]`. Then step
   10 — segment planning (Section 9), the first step in the actual
   download pipeline.
+
+- **Session 33** (2026-07-05) — Step 9 confirmed: all three dialect
+  fallback assertions passed. Built step 10: `planning.py`'s pure
+  `plan_segments()` function, wired directly into `tick.py`'s existing
+  post-air check rather than left standalone, since the tick already has
+  real jobs (recordings 25, 26) sitting in "ready for fetch" state from
+  prior sessions — planning them for real on the very next tick is a
+  better test than another synthetic-only action. Segment planning runs
+  independently of the "ready" log line's own dedup flag (different
+  state key), so recording 25 — already logged as ready back in Session
+  29 — will get its segments planned on the first tick after this
+  update, without needing a fresh test recording. Added
+  `segments_exist`/`create_segments`/`get_segments` to `state.py` and a
+  "List Pending Segments" action so the plan can be inspected from the
+  UI without shell/DB access. Bumped to v0.15.0. **Next:** user confirms
+  the "planned N segment(s)" log line appears for recordings 25/26 (or
+  a `run_status_tick` click if it's not automatic yet) and that "List
+  Pending Segments" shows the expected chunks. Then step 11 — the real
+  HTTP fetch for a single segment, which is what will finally exercise
+  `dialect.fetch_with_fallback()`'s callback for real.

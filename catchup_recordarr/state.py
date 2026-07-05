@@ -228,6 +228,67 @@ def increment_account_dialect_failures(m3u_account_id):
             conn.close()
 
 
+def segments_exist(recording_id):
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM segments WHERE recording_id = ? LIMIT 1",
+                (recording_id,),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+
+def create_segments(recording_id, segments):
+    """Idempotent - INSERT OR IGNORE per segment, so re-planning (e.g. if
+    the tick that triggers it fires more than once before segments_exist
+    is checked) never duplicates rows or resets progress on a segment
+    already claimed.
+
+    segments: iterable of (idx, start_utc_iso, duration_minutes).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.executemany(
+                "INSERT OR IGNORE INTO segments "
+                "(recording_id, idx, start_utc, duration_minutes, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(recording_id, idx, start, dur, now) for idx, start, dur in segments],
+            )
+        finally:
+            conn.close()
+
+
+def get_segments(recording_id):
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT idx, start_utc, duration_minutes, status, retry_count, "
+                "last_error, file_path FROM segments WHERE recording_id = ? "
+                "ORDER BY idx",
+                (recording_id,),
+            ).fetchall()
+            return [
+                {
+                    "idx": r[0],
+                    "start_utc": r[1],
+                    "duration_minutes": r[2],
+                    "status": r[3],
+                    "retry_count": r[4],
+                    "last_error": r[5],
+                    "file_path": r[6],
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
+
 def claim(key, stale_after):
     """Atomically claim `key` if unclaimed or stale; returns True if won.
 

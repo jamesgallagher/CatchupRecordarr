@@ -10,9 +10,10 @@ that step 6 exists):
    the badge is purely time-based (start <= now < end, RecordingCard.jsx)
    - it has no way to know a plugin cancelled the native capture.
 
-2. Detect when a taken-over recording's window has closed (+ grace) and
-   log that it's ready for a catchup fetch. Detection/logging only for
-   now - the actual download pipeline is steps 7-16, not built yet.
+2. Detect when a taken-over recording's window has closed (+ grace),
+   plan its segments (Section 9, step 10) if not already planned, and
+   log that it's ready for a catchup fetch. No actual fetching yet -
+   that's step 11.
 """
 
 import logging
@@ -28,6 +29,7 @@ from apps.channels.models import Recording
 from . import state
 from ._version import LOG_TAG
 from .archive import channel_archive_retention_days
+from .planning import SEGMENT_MINUTES, plan_segments
 
 logger = logging.getLogger(__name__)
 
@@ -107,17 +109,32 @@ def _check_post_air_ready():
                 state.set(f"post_air_retention_warned:{rec.id}", "1")
             continue
 
-        # Detection only for now - log once per job, not every tick,
-        # since nothing consumes "ready" yet (steps 7-16 aren't built),
-        # so without this a job would otherwise re-log every 60s for as
-        # long as its retention window stays open (potentially days).
+        # Plan segments (step 10) the first time a job is seen as ready -
+        # idempotent regardless of how many ticks see it before the
+        # actual fetch (step 11) exists to consume them.
+        if not state.segments_exist(rec.id):
+            segments = plan_segments(rec.start_time, rec.end_time)
+            state.create_segments(
+                rec.id, [(idx, s.isoformat(), dur) for idx, s, dur in segments]
+            )
+            logger.info(
+                "%s recording %s: planned %d segment(s) (%d min each, "
+                "window %s to %s)",
+                LOG_TAG, rec.id, len(segments), SEGMENT_MINUTES,
+                rec.start_time, rec.end_time,
+            )
+
+        # Log "ready" once per job, not every tick, since nothing fetches
+        # a planned segment yet (step 11 isn't built) - without this a
+        # job would otherwise re-log every 60s for as long as its
+        # retention window stays open, potentially days.
         if state.get(f"post_air_ready_logged:{rec.id}"):
             continue
         program = (rec.custom_properties or {}).get("program") or {}
         logger.info(
             "%s recording %s ('%s' on channel '%s') ready for catchup fetch "
-            "(window closed %s ago) - detection only, download pipeline not "
-            "built yet (steps 7-16)",
+            "(window closed %s ago) - segments planned, no fetch yet "
+            "(step 11 not built)",
             LOG_TAG, rec.id, program.get("title", "?"),
             getattr(rec.channel, "name", "?"), now - rec.end_time,
         )

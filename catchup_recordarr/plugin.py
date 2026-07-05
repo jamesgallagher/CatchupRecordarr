@@ -160,11 +160,21 @@ class Plugin:
             "label": "Run Status Tick Now",
             "description": (
                 "Immediately flip any taken-over recording within its air window "
-                "to 'interrupted', and log any recording whose window has closed "
-                "as ready for a catchup fetch (detection only - no download "
-                "pipeline yet), instead of waiting up to 60 seconds."
+                "to 'interrupted', plan segments for any recording whose window "
+                "has closed, and log it as ready for a catchup fetch (no "
+                "download pipeline yet), instead of waiting up to 60 seconds."
             ),
             "button_label": "Run Now",
+        },
+        {
+            "id": "list_pending_segments",
+            "label": "List Pending Segments",
+            "description": (
+                "Show planned segments for every taken-over job that hasn't "
+                "reached a terminal state yet - which windows were split into "
+                "which chunks, and each segment's current status."
+            ),
+            "button_label": "List",
         },
         {
             "id": "test_timeshift_url",
@@ -219,6 +229,23 @@ class Plugin:
             tick._check_post_air_ready()
             log.info("%s status tick run manually", LOG_TAG)
             return {"status": "ok", "message": "Status tick complete - check logs for details."}
+
+        if action_id == "list_pending_segments":
+            recording_ids = state.non_terminal_job_recording_ids()
+            if not recording_ids:
+                return {"status": "ok", "message": "No non-terminal jobs found."}
+            lines = []
+            for rid in recording_ids:
+                segments = state.get_segments(rid)
+                if not segments:
+                    lines.append(f"recording {rid}: no segments planned yet")
+                    continue
+                seg_summary = ", ".join(
+                    f"#{s['idx']} {s['start_utc']} ({s['duration_minutes']}m) [{s['status']}]"
+                    for s in segments
+                )
+                lines.append(f"recording {rid} ({len(segments)} segment(s)): {seg_summary}")
+            return {"status": "ok", "message": "\n".join(lines)}
 
         if action_id == "test_timeshift_url":
             from .timeshift import build_timeshift_url
