@@ -530,6 +530,23 @@ formatting isn't locale-sensitive this way, but the equivalent risk for us
 is any implicit locale-aware date formatting — build this string manually
 or with an explicit format call, never a locale-aware strftime default.
 
+**Built, Session 30 (step 7):** `timeshift.py`, `build_timeshift_url()` —
+both dialects, start time built from zero-padded integer fields (never
+`strftime`, per the note above), credentials escaped via
+`urllib.parse.quote(safe="")` (Python's equivalent of .NET's
+`Uri.EscapeDataString` — escapes everything outside the unreserved
+character set). Verified against Sportarr's exact test fixtures rather
+than just "looks right": same server/user/pass/stream_id/start/duration
+inputs produce the identical path-style and PHP-style URLs, including
+the `:` staying literal in the path form but becoming `%3A` in the query
+form. This step is pure string construction, no network calls — no
+timezone conversion (step 8) or dialect fallback/retry (step 9) wired in
+yet. A dummy-data test action (`Test Timeshift URL Builder`) exists so
+this can be visually confirmed without touching a real provider —
+returned in the action's response text, never logged (Section 14: never
+log a constructed timeshift URL, it carries real credentials once real
+values are used; this action only ever uses placeholder ones).
+
 **Per-account dialect state:** one row per `M3UAccount` in the plugin's
 SQLite (Section 6) — not per-channel, since the dialect is a property of
 the provider's panel software, not the individual stream: `dialect`
@@ -1771,3 +1788,30 @@ diverges from the sections above.)*
   closes out the "takeover + detection fully working, nothing downloaded
   yet" milestone from Section 15. Then step 7: the timeshift URL builder
   (Section 8), the first step that talks to the provider.
+
+- **Session 29** (2026-07-05) — Step 6 confirmed on the real deployment:
+  recording 25 correctly logged "ready for catchup fetch" once its grace
+  period elapsed, and — the specific thing worth confirming — the dedup
+  held across roughly 34 subsequent ticks (60s apart, ~34 minutes) with
+  zero repeats of that line. Takeover and the status tick both continued
+  working cleanly for a 4th independent recording (26) in the same test
+  window. **Milestone reached** (Section 15): takeover + detection are
+  fully working end-to-end on a real instance; nothing downloaded yet.
+  **Next:** step 7, the timeshift URL builder (Section 8).
+
+- **Session 30** (2026-07-05) — Built step 7: `timeshift.py`,
+  `build_timeshift_url()` for both dialects. Pure string construction,
+  verified against Sportarr's exact test fixtures (same inputs produce
+  identical output, including `:` staying literal in the path form but
+  becoming `%3A` in the query form) rather than just visually checked.
+  Correction to last session's framing: step 7 makes **no network
+  calls at all** — it's step 8 (UA + timezone resolution) that's
+  actually the first one to talk to the provider, since resolving the
+  server's timezone requires a real auth call. Added a dummy-data test
+  action (never real credentials) so the format can be visually
+  confirmed without touching a provider; the result is returned in the
+  action's response text, never logged, consistent with Section 14's
+  "never log a constructed timeshift URL" rule. Bumped to v0.12.0.
+  **Next:** user runs "Test Timeshift URL Builder" and confirms the two
+  URLs match Section 8's spec, then step 8 — UA + timezone resolution,
+  the actual first provider network call.

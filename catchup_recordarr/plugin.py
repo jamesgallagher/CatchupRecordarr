@@ -166,6 +166,16 @@ class Plugin:
             ),
             "button_label": "Run Now",
         },
+        {
+            "id": "test_timeshift_url",
+            "label": "Test Timeshift URL Builder",
+            "description": (
+                "Build both timeshift URL dialects with placeholder values "
+                "(no real provider involved) to visually confirm the format "
+                "matches Section 8's spec."
+            ),
+            "button_label": "Test",
+        },
     ]
 
     def run(self, action_id, params, context):
@@ -188,6 +198,22 @@ class Plugin:
             tick._check_post_air_ready()
             log.info("%s status tick run manually", LOG_TAG)
             return {"status": "ok", "message": "Status tick complete - check logs for details."}
+
+        if action_id == "test_timeshift_url":
+            from .timeshift import build_timeshift_url
+
+            example_start = datetime(2026, 6, 11, 19, 55, 0)
+            path_url = build_timeshift_url(
+                "http://provider.example:8080", "user", "pass", 12345, example_start, 215, dialect="path"
+            )
+            php_url = build_timeshift_url(
+                "http://provider.example:8080", "user", "pass", 12345, example_start, 215, dialect="php"
+            )
+            log.info("%s timeshift URL builder tested with placeholder values (no real provider)", LOG_TAG)
+            return {
+                "status": "ok",
+                "message": f"path: {path_url}\nphp: {php_url}",
+            }
 
         if action_id == "list_catchup_channels":
             from .archive import list_catchup_channels

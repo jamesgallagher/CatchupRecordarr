@@ -1,6 +1,6 @@
 {
     "name": "Catchup Recordarr",
-    "version": "0.11.0",
+    "version": "0.12.0",
     "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
     "author": "James",
     "help_url": "https://github.com/jamesgallagher/CatchupRecordarr",
@@ -29,6 +29,12 @@
             "label": "Run Status Tick Now",
             "description": "Immediately flip any taken-over recording within its air window to 'interrupted', and log any recording whose window has closed as ready for a catchup fetch (detection only - no download pipeline yet), instead of waiting up to 60 seconds.",
             "button_label": "Run Now"
+        },
+        {
+            "id": "test_timeshift_url",
+            "label": "Test Timeshift URL Builder",
+            "description": "Build both timeshift URL dialects with placeholder values (no real provider involved) to visually confirm the format matches Section 8's spec.",
+            "button_label": "Test"
         }
     ]
 }
