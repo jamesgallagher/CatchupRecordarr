@@ -1,14 +1,14 @@
 {
     "manifest": {
-        "registry_name": "DispatcharrRecordarr Plugin Repo",
-        "registry_url": "https://github.com/jamesgallagher/DispatcharrRecordarr",
+        "registry_name": "Catchup Recordarr Plugin Repo",
+        "registry_url": "https://github.com/jamesgallagher/CatchupRecordarr",
         "plugins": [
             {
-                "slug": "dispatcharr_recordarr",
-                "name": "DispatcharrRecordarr",
+                "slug": "catchup_recordarr",
+                "name": "Catchup Recordarr",
                 "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
-                "latest_version": "0.2.0",
-                "manifest_url": "https://raw.githubusercontent.com/jamesgallagher/DispatcharrRecordarr/main/dispatcharr_recordarr-manifest.json"
+                "latest_version": "0.3.0",
+                "manifest_url": "https://raw.githubusercontent.com/jamesgallagher/CatchupRecordarr/main/catchup_recordarr-manifest.json"
             }
         ]
     }

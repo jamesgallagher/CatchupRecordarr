@@ -1,9 +1,9 @@
 {
-    "name": "DispatcharrRecordarr",
-    "version": "0.2.0",
+    "name": "Catchup Recordarr",
+    "version": "0.3.0",
     "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
     "author": "James",
-    "help_url": "https://github.com/jamesgallagher/DispatcharrRecordarr",
+    "help_url": "https://github.com/jamesgallagher/CatchupRecordarr",
     "fields": [],
     "actions": [
         {

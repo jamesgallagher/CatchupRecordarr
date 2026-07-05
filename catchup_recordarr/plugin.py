@@ -6,7 +6,7 @@ from .tasks import ARCHIVE_REFRESH_TASK_PATH
 
 logger = logging.getLogger(__name__)
 
-ARCHIVE_REFRESH_TASK_NAME = "dispatcharr_recordarr-archive-refresh"
+ARCHIVE_REFRESH_TASK_NAME = "catchup_recordarr-archive-refresh"
 
 
 def _register_periodic_tasks():
@@ -36,14 +36,14 @@ class Plugin:
     attributes are enough.
     """
 
-    name = "DispatcharrRecordarr"
-    version = "0.2.0"
+    name = "Catchup Recordarr"
+    version = "0.3.0"
     description = (
         "Detects catchup/timeshift-capable channels and fulfills scheduled "
         "recordings from the provider's archive instead of live capture."
     )
     author = "James"
-    help_url = "https://github.com/jamesgallagher/DispatcharrRecordarr"
+    help_url = "https://github.com/jamesgallagher/CatchupRecordarr"
 
     fields = []
 
@@ -70,7 +70,7 @@ class Plugin:
 
         if action_id == "ping":
             log.info("[Catchup] ping action invoked - plugin is loaded and responding")
-            return {"status": "ok", "message": "DispatcharrRecordarr is loaded and responding."}
+            return {"status": "ok", "message": "Catchup Recordarr is loaded and responding."}
 
         if action_id == "refresh_archive_flags":
             from .tasks import refresh_archive_flags

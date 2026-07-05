@@ -1,4 +1,4 @@
-# DispatcharrRecordarr — Design Document
+# Catchup Recordarr — Design Document
 
 **Project:** A Dispatcharr plugin that detects IPTV channels supporting
 catchup/timeshift, waits for a scheduled program — anything in the TV
@@ -200,12 +200,12 @@ inventing after all.
   at all, regardless of content type.
 
 **`comskip_enabled` needs a new home.** The per-channel marker from the
-now-dropped flagging mechanism (`custom_properties["dispatcharr_recordarr"]`)
+now-dropped flagging mechanism (`custom_properties["catchup_recordarr"]`)
 no longer has a natural "flagging moment" to live in. Simplest fix,
 applied for v1: a single plugin-wide setting, `comskip_enabled_default`
 (bool, default **off**, same opt-in-by-default philosophy as before).
 A per-channel override marker is still *possible* later via the same
-`custom_properties["dispatcharr_recordarr"]["comskip_enabled"]` shape
+`custom_properties["catchup_recordarr"]["comskip_enabled"]` shape
 (now the only key it holds) if finer control turns out to matter — kept
 as an easy follow-up, not designed further now since nothing currently
 needs it. Section 7's gating logic is updated to match.
@@ -364,7 +364,7 @@ the same Celery task the native pipeline calls, unmodified — only when
 1. `CoreSettings.get_dvr_comskip_enabled()` is True (the existing global
    Dispatcharr DVR-comskip switch), **and**
 2. The plugin's own `comskip_enabled_default` setting (Section 4) is True
-   — or the channel's optional `custom_properties["dispatcharr_recordarr"]["comskip_enabled"]`
+   — or the channel's optional `custom_properties["catchup_recordarr"]["comskip_enabled"]`
    override, if one is ever set, takes precedence over the default.
 
 Chosen deliberately over letting the plugin's flag act alone: if an
@@ -1366,7 +1366,7 @@ diverges from the sections above.)*
   **Next:** begin Phase A, step 1 (plugin scaffolding).
 
 - **Session 18** (2026-07-05) — Built and verified step 1 (Section 15
-  Phase A): `dispatcharr_recordarr/plugin.py` + `plugin.json`, a minimal
+  Phase A): `catchup_recordarr/plugin.py` + `plugin.json`, a minimal
   `Plugin` class with one `ping` action, following the exact shape
   `apps/plugins/loader.py` reads (plain class attributes via `getattr`,
   no required `__init__` args). Also built out repo-based distribution,
@@ -1378,7 +1378,7 @@ diverges from the sections above.)*
   confirmed GitHub's automatic tag-archive zip works as-is since the
   installer walks the whole extracted tree for `plugin.py`/`__init__.py`
   rather than requiring it at the zip root. Built `manifest.json` and
-  `dispatcharr_recordarr-manifest.json`, pushed to `main`, tagged
+  `catchup_recordarr-manifest.json`, pushed to `main`, tagged
   `v0.1.0`. Hit a real blocker mid-way: the repo was private, so
   Dispatcharr's unauthenticated fetch would 404 — flagged rather than
   worked around, user made the repo public, then every URL was
@@ -1413,7 +1413,31 @@ diverges from the sections above.)*
   code (takeover signal, segment downloads) is still ahead; user agreed to
   keep using the repo-install method. Bumped to v0.2.0 (both manifest
   files + plugin.json + Plugin.version) since Dispatcharr's UI diffs
-  `latest_version` to show "update available." **Next:** tag and push
-  v0.2.0, user reinstalls/updates via the repo and verifies archive
-  detection against real M3U accounts, then step 3 (SQLite state store
-  schema).
+  `latest_version` to show "update available." Pushed and tagged; GitHub
+  reported the repo had moved to `jamesgallagher/CatchupRecordarr` -
+  verified the redirect actually worked for both `raw.githubusercontent.com`
+  and the archive-zip download before concluding nothing was broken.
+
+- **Session 20** (2026-07-05) — Full project rename at the user's
+  request: "DispatcharrRecordarr" → **"Catchup Recordarr"** (display
+  name), plugin folder/slug `dispatcharr_recordarr` →
+  `catchup_recordarr`, GitHub repo → `jamesgallagher/CatchupRecordarr`
+  (the user had already renamed it). Updated everywhere rather than
+  partially: design.md's title and its `custom_properties["dispatcharr_recordarr"]`
+  key references (Sections 4/7 - the future comskip-override marker key,
+  not yet built, so no code needed updating, just the design language),
+  the plugin folder + `plugin.py`/`plugin.json`/`tasks.py` internals
+  (task name/path strings, `help_url`), both distribution manifest files
+  (`manifest.json`'s `slug`/`name`/`registry_url`/`registry_name`,
+  `catchup_recordarr-manifest.json`'s version URLs), and the git remote
+  itself (`git remote set-url`, rather than relying on GitHub's rename
+  redirect indefinitely). Deliberately left every actual `Dispatcharr`
+  (the target app) reference untouched - only this project's own name
+  changed, not the app it targets. Bumped to v0.3.0 since the slug change
+  means existing installs can't smoothly "update" (the plugin key
+  changes) - will need a fresh install under the new key. Historical
+  Session Log entries were also updated to the new name/paths for
+  document readability, rather than left stale under the old name.
+  **Next:** push + tag v0.3.0, verify every manifest URL resolves under
+  the new repo name, user does a fresh install (not an update, given the
+  slug change) and re-verifies archive detection, then step 3.
