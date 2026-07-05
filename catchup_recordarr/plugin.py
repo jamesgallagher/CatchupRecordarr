@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from django.db import close_old_connections
 
 from . import state
+from . import takeover  # noqa: F401 - connects the Recording post_save receiver (Section 5 Part A)
 from ._version import LOG_TAG, VERSION
 from .archive import refresh_archive_flags
 

@@ -28,6 +28,12 @@ def _parse_bool_ish(value):
         return False
 
 
+def stream_is_catchup_capable(stream):
+    """Section 3's only eligibility gate: tv_archive > 0 on the stream."""
+    cp = stream.custom_properties or {}
+    return _parse_bool_ish(cp.get("tv_archive", 0))
+
+
 def refresh_archive_flags():
     """Refresh tv_archive/tv_archive_duration for every active XC account's
     streams. Empty/failed fetch never clears existing flags - a provider

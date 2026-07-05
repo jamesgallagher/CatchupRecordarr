@@ -112,6 +112,39 @@ def set(key, value):
             conn.close()
 
 
+def job_exists(recording_id):
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM jobs WHERE recording_id = ?", (recording_id,)
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+
+def create_job(recording_id):
+    """Record a taken-over Recording as a pending catchup job. Idempotent -
+    INSERT OR IGNORE preserves existing status/retries if the takeover
+    receiver fires more than once for the same row (it fires at least
+    twice per new Recording: the original save plus core's nested
+    task_id-assignment save).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO jobs "
+                "(recording_id, status, created_at, updated_at) "
+                "VALUES (?, 'pending', ?, ?)",
+                (recording_id, now, now),
+            )
+        finally:
+            conn.close()
+
+
 def claim(key, stale_after):
     """Atomically claim `key` if unclaimed or stale; returns True if won.
 

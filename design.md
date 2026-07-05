@@ -283,6 +283,30 @@ rather than assuming one was needed:
   load after core apps are ready — but flagged as something to verify
   once this is actually built, not asserted as certain here.
 
+**Implementation findings, Session 25 (step 4 build):**
+- **A disabled plugin's signals stay connected.** Disabling a plugin in
+  the UI doesn't unload its module, so the receiver keeps firing — it
+  must check `PluginConfig.enabled` itself before acting, or a disabled
+  plugin would keep cancelling captures. Built in.
+- **Receiver ordering under load:** the receiver fires on *every*
+  `Recording` save, including the ~2s progress writes during an active
+  live capture — guards are ordered cheapest-first (`task_id` in memory,
+  `start_time` in memory, job-exists in SQLite, then the two Django
+  queries) so the hot path exits without touching the DB. It also fires
+  at least twice per new Recording (original save + core's nested
+  `task_id` save); idempotency via `INSERT OR IGNORE` on the jobs table.
+  `dispatch_uid` on the receiver keeps reconnection idempotent across
+  plugin reloads.
+- **Known gap, deferred to step 6:** recordings scheduled while the
+  plugin was disabled (or before install) keep native live capture —
+  the signal never saw them. Part B's periodic tick should do a
+  catch-up sweep of future-scheduled recordings on capable channels
+  that aren't in the jobs table yet. Flagged, not yet built.
+- **In-progress recordings are never touched:** the receiver only acts
+  when `start_time` is still in the future — revoking a schedule can't
+  stop a capture Celery Beat already dispatched, so anything already
+  airing keeps its native live path.
+
 **Part B — post-air poll (periodic tick, unchanged cadence, 5–15 min).**
 Once a `Recording` has been taken over (Part A), the plugin still needs to
 know when to actually pull it from the archive. **Mechanism note, Session
@@ -1638,3 +1662,25 @@ diverges from the sections above.)*
   v0.7.0 (ping should report "state store OK (schema v1)"), then step 4
   — the Recording takeover signal receiver (Section 5 Part A), the
   first step that actively modifies native scheduling behavior.
+
+- **Session 25** (2026-07-05) — v0.7.0 verified (ping reported "state
+  store OK (schema v1)"); step 3 complete. Built step 4 (Section 5 Part
+  A): new `takeover.py` with a `post_save` receiver on `Recording` that
+  revokes native live capture and records a pending job, exactly per the
+  Session 6/8 design (leave `task_id` populated, defensive guards,
+  `revoke_task` reused). Verified `Channel.streams` M2M and `Recording`
+  fields against the model source before writing. Three implementation
+  findings written into Section 5: disabled plugins keep their signals
+  connected (receiver checks `PluginConfig.enabled` itself); the
+  receiver fires on every Recording save including ~2s live-capture
+  progress writes (guards ordered cheapest-first) and at least twice per
+  new Recording (idempotent via jobs-table INSERT OR IGNORE +
+  `dispatch_uid`); and a known gap deferred to step 6 — recordings
+  scheduled while the plugin was disabled keep native capture until
+  Part B's tick learns to sweep them. Bumped to v0.8.0. **Next:** user
+  tests takeover with a THROWAWAY recording (nothing they want kept):
+  schedule a few minutes ahead on a catchup-capable channel, expect the
+  "took over recording" log line and no FFmpeg start at air time; also
+  schedule one on a non-capable channel and confirm it records normally.
+  Note: a taken-over recording will just sit there unfetched — the
+  pipeline that fulfills it is steps 5-16, not built yet.
