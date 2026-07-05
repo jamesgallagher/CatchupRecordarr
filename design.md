@@ -347,7 +347,18 @@ candidates = Recording.objects.filter(
 ## Section 6 — State Tracking `[~] DECIDED`
 
 - **Decision: plugin-owned SQLite file** (not a core Django model
-  migration), e.g. `/data/plugins/<plugin>/state.db`.
+  migration). **Path corrected, Session 23:** originally specified as
+  `/data/plugins/<plugin>/state.db` — inside the plugin's own folder.
+  That's provably wrong: Dispatcharr's installer
+  (`_install_plugin_from_zip`, `apps/plugins/api_views.py`) performs an
+  atomic directory swap on every repo-based update and **deletes the old
+  folder entirely**, so anything not in the release zip — including a
+  state database — is destroyed on every update. Once job/segment state
+  lives here, an update mid-download would silently wipe it. Actual
+  location: a **sibling** data directory,
+  `/data/plugins/catchup_recordarr_data/state.db` — survives updates,
+  still on the persisted volume, and ignored by the plugin loader (no
+  `plugin.py`/`__init__.py` inside).
 - Needs to track, at minimum:
   - Per program: identity — simply the native `Recording.id` now (Section
     4/5, revised, Session 6), since the plugin acts on an existing native
@@ -1556,3 +1567,41 @@ diverges from the sections above.)*
   new territory (self-contained thread instead of Celery), not just a
   binding tweak this time; next step is the user testing this against
   their real deployment.
+
+- **Session 23** (2026-07-05) — Full design + code review at the user's
+  request (model switched to Fable mid-project), before testing the
+  still-unverified v0.5.0. Three real defects found and fixed, folded
+  into v0.6.0 so the user tests once rather than twice:
+  1. **state.db would be destroyed on every plugin update** — verified in
+     `_install_plugin_from_zip` (`apps/plugins/api_views.py:249-292`)
+     that repo-based updates atomically swap the plugin directory and
+     delete the old one, wiping any file not in the release zip. Moved
+     the store to a sibling `catchup_recordarr_data/` directory that
+     survives updates; corrected Section 6's original (wrong) path
+     decision with the evidence.
+  2. **Thundering herd at first boot** — read the real production
+     `docker/uwsgi.ini`: 4 uWSGI workers under `lazy-apps=true` plus two
+     Celery workers, beat, and daphne as attach-daemons, so ~8 processes
+     each start our scheduler thread at boot and wake on the same
+     interval. v0.5.0's claim was a non-atomic get-then-set, making
+     simultaneous full provider fetches the *expected* first-boot
+     behavior (violating our own Section 9 one-connection principle),
+     not a rare race. Replaced with an atomic `state.claim()` using
+     SQLite `BEGIN IMMEDIATE` (check-then-set under a write lock), plus
+     random jitter (30-120s) on each thread's initial sleep.
+  3. **Stale Django DB connections in the long-lived thread** — the
+     scheduler's ORM connection idles ~24h between runs and PostgreSQL
+     will close it server-side; added `close_old_connections()` around
+     the refresh, matching Dispatcharr's own pattern in the plugin
+     loader.
+  Also verified as fine, no action: uWSGI thread support (the config's
+  `gevent-early-monkey-patch=true` makes our threads greenlets in web
+  workers — no `enable-threads` needed); `XCClient` accepting the
+  `UserAgent` model object; design doc consistency post-Celery-pivot.
+  Noted, deliberately not acted on: version string duplicated between
+  `plugin.json` and `_version.py` (manual sync); per-row `stream.save()`
+  vs `bulk_update` (fine at current scale). Bumped to v0.6.0.
+  **Next:** user updates to v0.6.0, restarts the AIO container, and
+  tests — expect `[Catchup v0.6.0] background scheduler thread started`
+  in logs, then "Refresh Now" runs synchronously (no Celery involved)
+  and logs per-account results. That verifies step 2 end-to-end.

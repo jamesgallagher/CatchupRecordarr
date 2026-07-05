@@ -1,7 +1,10 @@
 import logging
+import random
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+
+from django.db import close_old_connections
 
 from . import state
 from ._version import LOG_TAG, VERSION
@@ -42,31 +45,21 @@ def _due_for_refresh():
     return datetime.now(timezone.utc) - last_dt >= REFRESH_INTERVAL
 
 
-def _claim_refresh():
-    """Best-effort claim, not a strict distributed lock - separate
-    check-then-set across processes/threads, so a tiny race window exists
-    where two processes could both start a refresh around the same
-    moment. Accepted: worst case is a harmless redundant API call, not
-    worth a heavier locking scheme for.
-    """
-    claimed_at = state.get("archive_refresh_claimed_at")
-    if claimed_at:
-        try:
-            claimed_dt = datetime.fromisoformat(claimed_at)
-            if datetime.now(timezone.utc) - claimed_dt < CLAIM_STALE_AFTER:
-                return False
-        except ValueError:
-            pass
-    state.set("archive_refresh_claimed_at", datetime.now(timezone.utc).isoformat())
-    return True
-
-
 def _run_refresh_if_due():
     if not _due_for_refresh():
         return
-    if not _claim_refresh():
+    # Atomic cross-process claim (state.claim uses BEGIN IMMEDIATE) - every
+    # process that loads this plugin runs its own copy of this thread, and
+    # they all wake on the same interval, so simultaneous attempts are the
+    # expected case, not an edge case.
+    if not state.claim("archive_refresh_claimed_at", CLAIM_STALE_AFTER):
         return
     try:
+        # This thread's DB connection sits idle for ~24h between runs and
+        # may have been closed server-side; drop stale handles so the ORM
+        # opens a fresh one (the same pattern Dispatcharr itself uses
+        # around plugin actions and discovery).
+        close_old_connections()
         logger.info("%s daily archive-flag refresh starting", LOG_TAG)
         refresh_archive_flags()
         state.set(
@@ -75,15 +68,21 @@ def _run_refresh_if_due():
         )
     except Exception:
         logger.exception("%s daily archive-flag refresh failed", LOG_TAG)
+    finally:
+        close_old_connections()
 
 
 def _scheduler_loop():
-    # Let Django's app-loading sequence fully settle before touching the ORM -
-    # this thread starts during PluginsConfig.ready() (transitively), before
-    # Django guarantees every app is finished loading. Same reasoning as
-    # Sportarr's own CatchupDownloadService, which delays 30s before its
-    # first tick for the same reason.
-    time.sleep(30)
+    # Two reasons for the delay: (1) let Django's app-loading sequence fully
+    # settle before touching the ORM - this thread starts during
+    # PluginsConfig.ready() (transitively), before Django guarantees every
+    # app is finished loading (same reasoning as Sportarr's own 30s startup
+    # delay); (2) the random jitter staggers the many independent copies of
+    # this thread (4 uWSGI workers under lazy-apps, two Celery workers,
+    # beat, daphne - all load this module at boot) so they don't all hit
+    # the claim lock at the same instant. The atomic claim is the actual
+    # guard; jitter just avoids pointless contention.
+    time.sleep(30 + random.uniform(0, 90))
     while True:
         try:
             _run_refresh_if_due()
