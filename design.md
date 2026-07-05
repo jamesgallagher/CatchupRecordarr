@@ -48,6 +48,82 @@ may describe intent that shifts slightly once real code is written.
 
 ---
 
+## Current Status Snapshot (updated 2026-07-05, end of Session 36)
+
+**For picking this up on a different machine.** The Session Log below has
+the full history; this block is just the fast-orientation version.
+
+**Repo / deployment facts:**
+- GitHub repo: `github.com/jamesgallagher/CatchupRecordarr` (public,
+  renamed from `DispatcharrRecordarr` mid-project).
+- Live Dispatcharr install runs on Unraid, Docker container named
+  `Dispatcharr` (`DISPATCHARR_ENV=aio`). User has root shell access to
+  this container (used earlier for direct `manage.py shell`/`sqlite3`
+  verification) but **deliberately does not give this assistant direct
+  push/deploy access to it** — all updates go through Dispatcharr's own
+  plugin-repo install/update mechanism (Settings → Plugins → this repo's
+  manifest URL), never a direct file copy.
+- Version bump discipline: every release touches **4 files in lockstep**
+  — `catchup_recordarr/_version.py`, `catchup_recordarr/plugin.json`,
+  `manifest.json`, `catchup_recordarr-manifest.json` — plus a matching
+  git tag (`vX.Y.Z`) pushed to `main`, since the manifest's per-version
+  `url` fields point at GitHub's tag-archive zips. Always verify the
+  zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
+  against the tag's archive URL) before telling the user to update.
+- Current version: **v0.17.1**, pushed and tag-verified reachable.
+
+**Build progress:** steps 1–10 of Section 15's build plan are done; step
+11 (single-segment fetch) is functionally built and *has* successfully
+proven the fetch mechanism end-to-end against the user's real provider,
+but the most recent real test 404s (see below) — step 11 isn't fully
+closed out until that's understood. Steps 12–20 haven't started. Mirror
+this in the task list (`TaskCreate`/`TaskUpdate`) when resuming — task
+#11 should stay `in_progress` until the 404 investigation resolves.
+
+**Resolved this session (Sessions 35–36): a real credential leak.**
+`requests` exceptions embed the full request URL (including Xtream
+credentials) in their own `str()`. A failed fetch returned that string
+raw, leaking the user's real IPTV username/password into the UI
+response, Dispatcharr's server logs, and the chat transcript. Fixed in
+v0.17.0 via `errors.py::safe_error_string()` (exception type + HTTP
+status only, never `str(exc)`), applied everywhere a provider-facing
+exception is logged or returned (`download.py`, `archive.py`,
+`provider.py`). **User was advised to consider rotating their provider
+password** — worth checking whether they did, if that comes up again.
+
+**Open, in progress: why segment fetches 404 against the real provider.**
+Both timeshift dialects (`path` and `php`) fail identically on recording
+25's segment #0 (`2026-07-05T10:30:00+00:00`, 15m, channel retention
+1 day — well within the archive window, so not a timing/retention
+issue). The one concrete lead: the credentialed URL that leaked pre-fix
+was PHP-style but at `/play/timeshift.php` (this plugin builds
+`/streaming/timeshift.php`) with extra `token=`/`id=` query params —
+the fingerprint of the provider issuing an HTTP redirect to a signed
+CDN/edge URL, which may be what's actually 404ing, not the URL we build.
+v0.17.1 added `errors.py::describe_redirect_chain()` — surfaces the
+redirect chain as host+path only (query always stripped) in the fetch
+failure message, e.g. `"HTTP 404 (HTTPError): host/streaming/timeshift.php
+-> 302 -> host2/play/timeshift.php -> 404"`. **The user is going to keep
+re-running "Fetch One Pending Segment Now" against v0.17.1 and tracking
+that themselves** — no need to re-ask for it when resuming; just pick up
+from whatever redirect-chain output they report (or report there wasn't
+one), and reason from there. Live possibilities once that data is in:
+a wrong stream id/param the redirect target rejects, a provider-side
+gap in this specific window's archive despite being in-retention, or
+(less likely, given both dialects fail the same way) something more
+subtle in how we resolve `stream_id` for this channel.
+
+**Immediate next steps, in order:**
+1. Read whatever redirect-chain (or no-redirect) result the user reports
+   and diagnose from it.
+2. Once the 404 is understood and step 11 is genuinely closed out, move
+   to step 12 (segment state machine + retry cap + orphan recovery,
+   Section 9) — design already fully specified there, just not built.
+3. Steps 13–20 follow per Section 15, same test-and-confirm-before-
+   proceeding pattern used throughout this build.
+
+---
+
 ## Section 1 — Goals & Non-Goals `[~] DECIDED`
 
 **Goal:** For IPTV channels whose provider supports catchup/timeshift
