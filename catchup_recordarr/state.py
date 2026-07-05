@@ -162,6 +162,72 @@ def create_job(recording_id):
             conn.close()
 
 
+def get_account_dialect(m3u_account_id):
+    """Section 8's per-account dialect memory. Returns None if never
+    recorded (cold start - caller defaults to 'path' per Sportarr's own
+    default, not this module's job to decide).
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT dialect, confirmed_at, consecutive_failures "
+                "FROM account_dialects WHERE m3u_account_id = ?",
+                (m3u_account_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "dialect": row[0],
+                "confirmed_at": row[1],
+                "consecutive_failures": row[2],
+            }
+        finally:
+            conn.close()
+
+
+def set_account_dialect(m3u_account_id, dialect, confirmed_at):
+    """Record a confirmed-working dialect and reset consecutive_failures -
+    only ever called after an actual successful fetch with this dialect
+    (self-healing on a stale/wrong prior detection), never on a guess.
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO account_dialects "
+                "(m3u_account_id, dialect, confirmed_at, consecutive_failures) "
+                "VALUES (?, ?, ?, 0) "
+                "ON CONFLICT(m3u_account_id) DO UPDATE SET "
+                "dialect = excluded.dialect, confirmed_at = excluded.confirmed_at, "
+                "consecutive_failures = 0",
+                (m3u_account_id, dialect, confirmed_at),
+            )
+        finally:
+            conn.close()
+
+
+def increment_account_dialect_failures(m3u_account_id):
+    """Both dialects failed for this account. Deliberately does not touch
+    which dialect is preferred (Section 8 - don't thrash the setting on a
+    transient provider outage; only a confirmed successful fetch with
+    the other dialect should flip it).
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "INSERT INTO account_dialects "
+                "(m3u_account_id, dialect, consecutive_failures) "
+                "VALUES (?, 'unknown', 1) "
+                "ON CONFLICT(m3u_account_id) DO UPDATE SET "
+                "consecutive_failures = consecutive_failures + 1",
+                (m3u_account_id,),
+            )
+        finally:
+            conn.close()
+
+
 def claim(key, stale_after):
     """Atomically claim `key` if unclaimed or stale; returns True if won.
 

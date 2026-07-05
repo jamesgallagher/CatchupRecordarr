@@ -186,6 +186,17 @@ class Plugin:
             ),
             "button_label": "Test",
         },
+        {
+            "id": "test_dialect_fallback",
+            "label": "Test Dialect Fallback Logic",
+            "description": (
+                "Self-test with mock fetch results (no real provider, no real "
+                "account touched) verifying the cold-start default, the "
+                "self-healing flip on a successful fallback, and that a "
+                "double failure leaves the preference untouched."
+            ),
+            "button_label": "Test",
+        },
     ]
 
     def run(self, action_id, params, context):
@@ -251,6 +262,51 @@ class Plugin:
                     "reported clock is unexpectedly far from ours."
                 ),
             }
+
+        if action_id == "test_dialect_fallback":
+            from . import state as _state
+            from .dialect import fetch_with_fallback, get_preferred_dialect
+
+            test_id = -1  # synthetic - never a real M3UAccount.id (always positive)
+            _state.set_account_dialect(test_id, "unknown", None)  # clean slate
+
+            results = []
+
+            cold = get_preferred_dialect(test_id)
+            results.append(
+                f"cold-start default: '{cold}' "
+                f"[{'PASS' if cold == 'path' else 'FAIL, expected path'}]"
+            )
+
+            def fail_all(url):
+                return (False, "simulated failure")
+
+            def php_only(url):
+                return ("php" in url, "simulated success")
+
+            ok, used, _ = fetch_with_fallback(
+                test_id, "test-account", lambda d: f"http://x/{d}", php_only
+            )
+            after_flip = get_preferred_dialect(test_id)
+            results.append(
+                f"path fails, php succeeds: success={ok}, used='{used}', "
+                f"new preference='{after_flip}' "
+                f"[{'PASS' if ok and used == 'php' and after_flip == 'php' else 'FAIL'}]"
+            )
+
+            ok2, used2, _ = fetch_with_fallback(
+                test_id, "test-account", lambda d: f"http://x/{d}", fail_all
+            )
+            still_pref = get_preferred_dialect(test_id)
+            row = _state.get_account_dialect(test_id)
+            results.append(
+                f"both dialects fail: success={ok2}, preference unchanged="
+                f"{still_pref == 'php'}, consecutive_failures={row['consecutive_failures']} "
+                f"[{'PASS' if not ok2 and used2 is None and still_pref == 'php' and row['consecutive_failures'] >= 1 else 'FAIL'}]"
+            )
+
+            log.info("%s dialect fallback self-test: %s", LOG_TAG, " | ".join(results))
+            return {"status": "ok", "message": "\n".join(results)}
 
         if action_id == "list_catchup_channels":
             from .archive import list_catchup_channels

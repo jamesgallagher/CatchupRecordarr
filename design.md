@@ -582,6 +582,22 @@ which is more binary than earlier drafts of this section proposed):
    3 itself does not consume a retry-cap slot — it's dialect discovery,
    not a real failure of a known-good path.
 
+**Built, Session 32 (step 9 of the build plan — not to be confused with
+design Section 9):** `dialect.py` owns this entire algorithm as pure
+decision logic with no HTTP knowledge — `get_preferred_dialect()`,
+`record_success()`/`record_failure()` against the `account_dialects`
+table (Section 6, schema already existed from step 3), and
+`fetch_with_fallback(account_id, name, url_for_dialect, fetch_fn)`,
+which takes the *fetch* itself as an injected callback. This is
+deliberate: step 11 (the real HTTP fetch with the 1MB threshold check)
+supplies that callback, so this module's branching — cold start,
+successful fallback flips the preference, double failure leaves it
+alone and just records the failure — is fully testable with mock
+results, no real provider or even step 11 required yet. A manual test
+action runs three scripted scenarios against a synthetic account id
+(never a real one) with real pass/fail assertions, not just numbers to
+eyeball.
+
 **"Not ready" threshold:** fixed at 1MB for v1, matching Sportarr's
 hardcoded constant exactly rather than inventing our own number. Not
 exposed as a user setting for now — revisit only if real-world testing
@@ -1848,3 +1864,23 @@ diverges from the sections above.)*
   download on that account is suspect). Then step 9: dialect
   fallback/retry logic, the last piece of Section 8 before segmented
   downloading (step 10+) can start.
+
+- **Session 32** (2026-07-05) — Step 8 confirmed: real authentication
+  succeeded against the account (`Asia/Magadan` resolved), no clock-skew
+  warning raised. Built step 9: `dialect.py` — pure decision logic
+  (cold-start default, fallback ordering, self-healing flip on success,
+  unchanged-on-double-failure), deliberately decoupled from HTTP via an
+  injected `fetch_fn` callback so it's testable now, before step 11
+  builds the real fetch that will supply that callback. Added
+  `get_account_dialect`/`set_account_dialect`/
+  `increment_account_dialect_failures` to `state.py` against the
+  `account_dialects` table (schema already existed from step 3). Test
+  action runs three scripted mock scenarios with real pass/fail
+  assertions against a synthetic account id (`-1`, never a real one) —
+  first step in the build where the test itself asserts correctness
+  rather than asking the user to eyeball output, since this step is
+  branching logic rather than string formatting or a live provider
+  response. Bumped to v0.14.0. **Next:** user runs "Test Dialect
+  Fallback Logic" and confirms all three lines show `[PASS]`. Then step
+  10 — segment planning (Section 9), the first step in the actual
+  download pipeline.

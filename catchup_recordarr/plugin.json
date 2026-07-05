@@ -1,6 +1,6 @@
 {
     "name": "Catchup Recordarr",
-    "version": "0.13.0",
+    "version": "0.14.0",
     "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
     "author": "James",
     "help_url": "https://github.com/jamesgallagher/CatchupRecordarr",
@@ -40,6 +40,12 @@
             "id": "test_provider_timezone",
             "label": "Test Provider Timezone Resolution",
             "description": "Authenticate to each active Xtream Codes account, resolve its reported local timezone, and check its reported clock against ours (Section 10). Makes a real request to your provider(s).",
+            "button_label": "Test"
+        },
+        {
+            "id": "test_dialect_fallback",
+            "label": "Test Dialect Fallback Logic",
+            "description": "Self-test with mock fetch results (no real provider, no real account touched) verifying the cold-start default, the self-healing flip on a successful fallback, and that a double failure leaves the preference untouched.",
             "button_label": "Test"
         }
     ]
