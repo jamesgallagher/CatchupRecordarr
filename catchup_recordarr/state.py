@@ -26,6 +26,51 @@ _DB_PATH = os.path.join(_DATA_DIR, "state.db")
 
 _lock = threading.Lock()
 
+SCHEMA_VERSION = "1"
+
+# Full Section 6 schema. Job identity is the native Recording.id (the
+# plugin acts on existing native rows, it never invents its own job ids).
+# Statuses are plain strings matching the design's state machines:
+#   jobs:     pending / in_progress / completed / failed
+#   segments: pending / in_progress / completed  (failure -> back to
+#             pending, Section 9 - deliberately no dead-end state)
+# account_dialects holds Section 8's per-M3UAccount timeshift dialect.
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS kv (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    recording_id INTEGER PRIMARY KEY,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    retry_count  INTEGER NOT NULL DEFAULT 0,
+    last_error   TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS segments (
+    recording_id     INTEGER NOT NULL REFERENCES jobs(recording_id) ON DELETE CASCADE,
+    idx              INTEGER NOT NULL,
+    start_utc        TEXT NOT NULL,
+    duration_minutes INTEGER NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    retry_count      INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT,
+    file_path        TEXT,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (recording_id, idx)
+);
+
+CREATE TABLE IF NOT EXISTS account_dialects (
+    m3u_account_id       INTEGER PRIMARY KEY,
+    dialect              TEXT NOT NULL DEFAULT 'unknown',
+    confirmed_at         TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0
+);
+"""
+
 
 def _connect():
     os.makedirs(_DATA_DIR, exist_ok=True)
@@ -33,8 +78,11 @@ def _connect():
     # Autocommit mode - transactions are managed explicitly where needed
     # (claim()); standalone statements commit immediately.
     conn.isolation_level = None
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(_SCHEMA)
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)"
+        "INSERT OR IGNORE INTO kv (key, value) VALUES ('schema_version', ?)",
+        (SCHEMA_VERSION,),
     )
     return conn
 

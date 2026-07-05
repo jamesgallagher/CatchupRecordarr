@@ -374,12 +374,22 @@ candidates = Recording.objects.filter(
   finishes.
 
 **Partially built, Session 21:** a minimal piece of this — a plain
-key-value `get`/`set` over a `state.db` SQLite file at the plugin's own
-folder path — was pulled forward into step 2 (Section 15) ahead of
-schedule, needed to persist the background scheduler's "last completed"
-timestamp once the Celery-task approach was replaced (Section 2/3). The
-full job/segment schema envisioned above still needs building; this is
-just the storage layer it'll sit on top of.
+key-value `get`/`set` over a `state.db` SQLite file — was pulled forward
+into step 2 (Section 15) ahead of schedule, needed to persist the
+background scheduler's "last completed" timestamp once the Celery-task
+approach was replaced (Section 2/3).
+
+**Schema built, Session 24 (step 3):** full schema now in `state.py` —
+`kv` (scheduler state + `schema_version`), `jobs` (PK = native
+`Recording.id`, status/retry_count/last_error/timestamps), `segments`
+(composite PK recording_id+idx, per-segment window, status, retry count,
+downloaded file path; failure returns to `pending` per Section 9's
+no-dead-end state machine), and `account_dialects` (Section 8's
+per-`M3UAccount` dialect: path/php/unknown, confirmed_at,
+consecutive_failures). `PRAGMA foreign_keys=ON` per connection;
+`CREATE TABLE IF NOT EXISTS` idempotent DDL with a stored
+`schema_version` for future migrations. Schema only — no job/segment
+logic wired to it yet, per the build plan.
 
 ---
 
@@ -1605,3 +1615,26 @@ diverges from the sections above.)*
   tests — expect `[Catchup v0.6.0] background scheduler thread started`
   in logs, then "Refresh Now" runs synchronously (no Celery involved)
   and logs per-account results. That verifies step 2 end-to-end.
+
+- **Session 24** (2026-07-05) — v0.6.0 verified end-to-end on the real
+  instance, in two rounds. First test: mechanics worked (scheduler
+  thread started, no Celery error, synchronous action ran) but completed
+  in 39ms with no per-account line — diagnosed from the timestamps as
+  "the XC+active account query matched nothing," not a code failure.
+  After the user's account situation changed, second test succeeded
+  fully: XC auth OK, 57 streams retrieved, **32 catchup-capable**, 0 DB
+  rows updated (correct — the normal M3U sync had already stored
+  matching flag values, exactly as Section 2 predicted). **Step 2
+  complete and verified.** Built step 3 (Section 6 schema): `jobs`,
+  `segments`, `account_dialects` tables added to `state.py` alongside
+  the existing `kv` table — idempotent DDL, `PRAGMA foreign_keys=ON`,
+  stored `schema_version` for future migrations; schema only, no logic
+  wired yet per the build plan. Also fixed the logging gap the first
+  test round exposed (an explicit "no active XC accounts found" INFO
+  line instead of a silent instant no-op — Section 14 philosophy applied
+  retroactively to a case that actually cost a debugging round), and
+  `ping` now reports state-store health + schema version so step 3 has
+  a user-verifiable output. Bumped to v0.7.0. **Next:** user verifies
+  v0.7.0 (ping should report "state store OK (schema v1)"), then step 4
+  — the Recording takeover signal receiver (Section 5 Part A), the
+  first step that actively modifies native scheduling behavior.

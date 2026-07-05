@@ -150,7 +150,15 @@ class Plugin:
 
         if action_id == "ping":
             log.info("%s ping action invoked - plugin is loaded and responding", LOG_TAG)
-            return {"status": "ok", "message": f"Catchup Recordarr v{VERSION} is loaded and responding."}
+            try:
+                schema_version = state.get("schema_version", "unknown")
+                store_status = f"state store OK (schema v{schema_version})"
+            except Exception as exc:
+                store_status = f"state store ERROR: {exc}"
+            return {
+                "status": "ok",
+                "message": f"Catchup Recordarr v{VERSION} is loaded and responding; {store_status}.",
+            }
 
         if action_id == "refresh_archive_flags":
             log.info("%s archive flag refresh starting (manual action, synchronous)", LOG_TAG)

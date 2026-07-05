@@ -7,7 +7,7 @@
                 "slug": "catchup_recordarr",
                 "name": "Catchup Recordarr",
                 "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
-                "latest_version": "0.6.0",
+                "latest_version": "0.7.0",
                 "manifest_url": "https://raw.githubusercontent.com/jamesgallagher/CatchupRecordarr/main/catchup_recordarr-manifest.json"
             }
         ]

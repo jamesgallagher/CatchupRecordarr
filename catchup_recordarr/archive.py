@@ -33,10 +33,23 @@ def refresh_archive_flags():
     streams. Empty/failed fetch never clears existing flags - a provider
     hiccup shouldn't silently downgrade catchup capability (Section 3).
     """
-    accounts = M3UAccount.objects.filter(
-        account_type=M3UAccount.Types.XC,
-        is_active=True,
+    accounts = list(
+        M3UAccount.objects.filter(
+            account_type=M3UAccount.Types.XC,
+            is_active=True,
+        )
     )
+
+    # Log the empty case explicitly - a silent instant no-op here cost a
+    # real debugging round (looked identical to a failure from the outside).
+    if not accounts:
+        logger.info(
+            "%s no active Xtream Codes (XC) accounts found - nothing to refresh. "
+            "Catchup requires the provider to be configured as an Xtream Codes "
+            "account type, not a plain M3U URL.",
+            LOG_TAG,
+        )
+        return
 
     for account in accounts:
         try:
