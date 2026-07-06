@@ -91,34 +91,68 @@ exception is logged or returned (`download.py`, `archive.py`,
 `provider.py`). **User was advised to consider rotating their provider
 password** — worth checking whether they did, if that comes up again.
 
-**Open, in progress: why segment fetches 404 against the real provider.**
-Both timeshift dialects (`path` and `php`) fail identically on recording
-25's segment #0 (`2026-07-05T10:30:00+00:00`, 15m, channel retention
-1 day — well within the archive window, so not a timing/retention
-issue). The one concrete lead: the credentialed URL that leaked pre-fix
-was PHP-style but at `/play/timeshift.php` (this plugin builds
-`/streaming/timeshift.php`) with extra `token=`/`id=` query params —
-the fingerprint of the provider issuing an HTTP redirect to a signed
-CDN/edge URL, which may be what's actually 404ing, not the URL we build.
-v0.17.1 added `errors.py::describe_redirect_chain()` — surfaces the
-redirect chain as host+path only (query always stripped) in the fetch
-failure message, e.g. `"HTTP 404 (HTTPError): host/streaming/timeshift.php
--> 302 -> host2/play/timeshift.php -> 404"`. **The user is going to keep
-re-running "Fetch One Pending Segment Now" against v0.17.1 and tracking
-that themselves** — no need to re-ask for it when resuming; just pick up
-from whatever redirect-chain output they report (or report there wasn't
-one), and reason from there. Live possibilities once that data is in:
-a wrong stream id/param the redirect target rejects, a provider-side
-gap in this specific window's archive despite being in-retention, or
-(less likely, given both dialects fail the same way) something more
-subtle in how we resolve `stream_id` for this channel.
+**Open, in progress: why segment fetches fail against the real
+provider — now looking like a provider outage, not our code.**
+v0.17.1's `describe_redirect_chain()` diagnostic paid off: the real
+result (Session 37, 2026-07-06) was
+`HTTP 521 (HTTPError): xapi-ie.org/streaming/timeshift.php -> 302 ->
+xonex.click/streaming/timeshift.php -> 521`. Two things this changes
+versus the earlier working theory:
+- **The path is `/streaming/timeshift.php` on *both* hops this time**,
+  not the mismatched `/play/timeshift.php` seen in the pre-fix leaked
+  URL — so the "wrong path on the redirect target" theory doesn't hold
+  up as a general explanation; that earlier leaked URL may just have
+  been a different redirect destination for a different request at a
+  different time, not evidence of a URL-construction bug on our side.
+- **521 is a Cloudflare-origin-down error**, not a 404 — i.e. the CDN
+  edge (`xonex.click`) reached the redirect target fine, but the origin
+  behind it was unreachable. The user independently confirmed **the
+  provider has been down all morning** (2026-07-06), and Dispatcharr's
+  own native DVR capture on the same provider was failing at the same
+  time for unrelated reasons — recording 27's log shows FFmpeg getting
+  HTTP 503s and "Stream ends prematurely," native capture giving up
+  after its own outage-retry window, "no HLS segments found." That's
+  independent corroboration from a completely different code path
+  (native live capture, not this plugin) that the provider itself was
+  down, not something specific to catchup fetching.
+- **Net effect: this result is inconclusive, not a fix-confirming or
+  fix-refuting result** — can't be fully verified until the provider is
+  back up and a retest is clean. Provider status is unknown at any given
+  moment ("might come back at any point... has been down all morning").
 
-**Immediate next steps, in order:**
-1. Read whatever redirect-chain (or no-redirect) result the user reports
-   and diagnose from it.
-2. Once the 404 is understood and step 11 is genuinely closed out, move
-   to step 12 (segment state machine + retry cap + orphan recovery,
-   Section 9) — design already fully specified there, just not built.
+**New requirement surfaced by the user, not yet built: preserve
+headers/cookies across the full redirect chain, matching TiViMate's
+known-working behavior.** The user has confirmed (from real-world use)
+that this provider routinely uses multi-hop redirects as normal
+operation (e.g. main API domain → CDN edge domain), and that TiViMate —
+a client known to work against this same provider — must be preserving
+User-Agent, cookies, and referrer across every hop for that to work,
+since that's the only way multi-redirect catchup URLs function at all
+for a working client. This plugin currently uses a single
+`requests.get(url, headers={"User-Agent": ...}, stream=True, ...)` call
+per attempt, relying on `requests`' default redirect-following — worth
+an explicit check once the provider is back: confirm the `User-Agent`
+header actually survives every hop (regular headers survive.
+`requests` only strips `Authorization` on a cross-host redirect, not
+custom headers — likely already fine but not yet verified against this
+specific provider), and consider whether any `Set-Cookie` on the first
+hop needs to be replayed on subsequent hops (a bare `requests.get()`
+already uses an internal `Session` for the duration of one call, so this
+*should* already work correctly — flagged for verification, not because
+a bug is confirmed). **Do not build a fix for this speculatively** — the
+current failures are fully explained by the provider outage; only
+revisit this if a *clean* retest (provider confirmed up) still fails.
+
+**Immediate next steps, in order, once the provider is confirmed back
+up (the user is tracking this themselves, no need to ask):**
+1. Get a clean retest result (provider up) of "Fetch One Pending Segment
+   Now" against v0.17.1. If it succeeds, step 11 is done — move to step
+   12. If it still fails, use `describe_redirect_chain()`'s output to
+   check whether headers/cookies are actually surviving the redirect
+   chain (the item above) before assuming anything else is wrong.
+2. Once the fetch is genuinely working, move to step 12 (segment state
+   machine + retry cap + orphan recovery, Section 9) — design already
+   fully specified there, just not built.
 3. Steps 13–20 follow per Section 15, same test-and-confirm-before-
    proceeding pattern used throughout this build.
 
@@ -2116,3 +2150,32 @@ diverges from the sections above.)*
   entirely (e.g. a stream/id mismatch, or this specific window genuinely
   missing from the provider's archive despite being within the retention
   window).
+
+- **Session 37** (2026-07-06) - v0.17.1's redirect-chain diagnostic
+  returned real data: `HTTP 521 (HTTPError):
+  xapi-ie.org/streaming/timeshift.php -> 302 ->
+  xonex.click/streaming/timeshift.php -> 521` for recording 25's
+  segment #0. This complicates the Session 36 "wrong redirect path"
+  theory rather than confirming it - both hops use the same
+  `/streaming/timeshift.php` path this time, and 521 is a
+  Cloudflare-origin-down error, not a 404. The user confirmed their
+  provider had been down all morning, and Dispatcharr's own native DVR
+  capture (recording 27, same provider, unrelated code path) was failing
+  at the same time with FFmpeg HTTP 503s and "no HLS segments found" -
+  independent corroboration this was a real provider outage, not
+  something specific to catchup fetching. Result is inconclusive rather
+  than fix-confirming. User also raised an important, not-yet-verified
+  requirement from real-world TiViMate use: this provider is known to
+  use multi-hop redirects as standard operation, and a working client
+  must be preserving User-Agent/cookies/referrer across every hop -
+  flagged in the Current Status Snapshot as something to check once a
+  clean (provider-up) retest is possible, deliberately not built
+  speculatively since the current failures are already fully explained
+  by the outage. No code changes this session - purely diagnostic
+  read-and-document. User is moving from laptop to PC for the next
+  session; added a "Current Status Snapshot" block near the top of this
+  doc (right after "How to use this document across sessions") to make
+  that handoff clean without replaying the full log. **Next:** whenever
+  the provider is confirmed back up, get a clean retest of "Fetch One
+  Pending Segment Now" against v0.17.1 and go from there per the
+  Snapshot's numbered next-steps list.
