@@ -143,6 +143,24 @@ a bug is confirmed). **Do not build a fix for this speculatively** — the
 current failures are fully explained by the provider outage; only
 revisit this if a *clean* retest (provider confirmed up) still fails.
 
+**Reference comparison, Session 38: Mustarrd (github.com/razzamatazm/mustarrd),
+a second real catchup-DVR implementation.** Read in depth to sanity-check
+open questions against more than just Sportarr. Bottom line: confirmed no
+better redirect/header pattern exists elsewhere (our explicit UA is
+arguably ahead of their unset one); confirmed our dialect fallback and
+automatic IANA timezone resolution are both ahead of Mustarrd (single
+hardcoded dialect, manual admin-set hour offset); found two genuinely
+additive ideas now folded into Section 9 for step 12 — a `Content-Type`
+sniff as a faster "provider error page" check alongside our 1MB
+threshold, and a disk-size check on each segment's file before
+re-fetching it during orphan recovery (skip ones that actually
+completed pre-crash); and found a cautionary validation in Section 14 —
+Mustarrd has its own credential-redaction helper but only wired it into
+2 of 7 leak-prone sinks, directly confirming our Session 35 approach
+(audit *every* exception handler, not just the one that broke) was the
+right call, now written up as a standing rule for any future handler
+added to this plugin. No code changed this session.
+
 **Immediate next steps, in order, once the provider is confirmed back
 up (the user is tracking this themselves, no need to ask):**
 1. Get a clean retest result (provider up) of "Fetch One Pending Segment
@@ -150,9 +168,10 @@ up (the user is tracking this themselves, no need to ask):**
    12. If it still fails, use `describe_redirect_chain()`'s output to
    check whether headers/cookies are actually surviving the redirect
    chain (the item above) before assuming anything else is wrong.
-2. Once the fetch is genuinely working, move to step 12 (segment state
+2. Once the fetch is genuinely working, build step 12 (segment state
    machine + retry cap + orphan recovery, Section 9) — design already
-   fully specified there, just not built.
+   fully specified there, now including the two Mustarrd-derived
+   refinements above (Content-Type sniff, disk-size orphan check).
 3. Steps 13–20 follow per Section 15, same test-and-confirm-before-
    proceeding pattern used throughout this build.
 
@@ -713,6 +732,22 @@ hardcoded constant exactly rather than inventing our own number. Not
 exposed as a user setting for now — revisit only if real-world testing
 shows a provider needs a different cutoff.
 
+**Refinement candidate, Session 38 (Mustarrd comparison, not yet built):**
+a second reference implementation (github.com/razzamatazm/mustarrd, a
+standalone catchup-DVR app — read its actual source, not just docs) has
+no byte-size threshold at all; instead it sniffs the response's
+`Content-Type` and treats `text/*`/`application/json`/`application/xml`
+as "provider returned an error page" before ever reading the body
+(`download_manager.py:1806-1816` in their source), plus a separate
+zero-byte check after a completed transfer. This is a cheap, fast-fail
+signal our 1MB check doesn't give us — a wrong-format error page is
+caught immediately rather than after downloading up to 1MB of it. Worth
+adding as a second, faster check *alongside* (not instead of) the 1MB
+threshold when step 12/the fetch path is next touched — genuinely
+additive, not a replacement, since a tiny-but-correctly-typed response
+(the "archive not ready" case Sportarr's own comment describes) would
+still need the size check to catch it.
+
 **Built, Session 34 (step 11):** `download.py`'s `fetch_segment()` — the
 actual HTTP fetch, streamed to a `.part` file with an atomic rename on
 success (nothing ever sees a partial segment as complete), the 1MB
@@ -890,7 +925,26 @@ of each periodic tick, before claiming new work, reset any segment found
 from the job-level one — same idea, applied at both granularities,
 instead of two different recovery strategies doing the same job.
 
----
+**Refinement candidate, Session 38 (Mustarrd comparison, not yet built):**
+before blindly resetting an orphaned `in_progress` segment to `pending`
+(and re-fetching it from scratch) in step 12, check whether its file
+already exists on disk at the expected size — Mustarrd's own startup
+recovery (`recover_incomplete_downloads()`, `download_manager.py:507+`)
+does exactly this for its (unsegmented) downloads: compares
+`downloaded_bytes` against actual on-disk size to tell "this actually
+finished, just never got marked complete" apart from "this is genuinely
+partial." Note precisely what Mustarrd does and doesn't do here, so we
+don't over-claim: for a truly *partial* file after a crash, Mustarrd
+does **not** resume from the partial bytes — its own docstring says
+"restart from scratch (no HTTP resume currently)"; byte-range resume is
+only used for its separate *mid-flight transient-retry* path, not crash
+recovery. So the applicable idea is narrower than "resume partial
+downloads" — it's "detect segments that actually completed before the
+crash and skip re-fetching only those," which is cheap and safe to add
+given each segment already has its own tracked file path (Section 6).
+Our segmented design already has a structural edge here Mustarrd's
+whole-file model lacks: a crash only ever needs to redo whichever
+segment was in flight, never the whole job.
 
 ## Section 10 — Failure, Retry & Crash Recovery (Job-Level) `[~] DECIDED (design only)`
 
@@ -1281,6 +1335,25 @@ is safe and more useful for debugging. Audited every `except ... as exc`
 in the plugin folder to confirm these were the only three at risk;
 `plugin.py`'s own handler only touches local SQLite state and was
 already safe.
+
+**Validated, Session 38 (Mustarrd comparison): a partial redaction layer
+is worse than no redaction layer, because it looks fixed.** Read
+Mustarrd's actual source for comparison (github.com/razzamatazm/mustarrd)
+and found it has its own redaction helpers
+(`_friendly_error()`/`_friendly_connection_error()`, with a code comment
+explicitly acknowledging the URL-leak risk) — but they're only wired
+into two DB-persisted fields. The raw, unredacted exception still leaks
+through five other sinks fed by the exact same exception objects: a
+WebSocket broadcast, a persisted JSONL log file, a public
+`/epg/status` API field, and a `status_message` DB column. Direct
+confirmation that our own approach here — grepping *every*
+`except ... as exc` in the codebase rather than just patching the one
+sink the user's real test happened to hit — was the right call, not
+excess caution. Any *future* exception handler added to this plugin
+(new provider-facing call, new action) must go through `safe_error_string()`
+from the start, and any logging-audit pass (step 19) should re-grep for
+new handlers added since, rather than trusting that "we have a
+redaction helper" implies "it's applied everywhere."
 
 **Optional, not yet needed:** a plugin setting for extra-verbose segment-
 claim/retry detail at DEBUG, independent of Dispatcharr's global log
@@ -2179,3 +2252,68 @@ diverges from the sections above.)*
   the provider is confirmed back up, get a clean retest of "Fetch One
   Pending Segment Now" against v0.17.1 and go from there per the
   Snapshot's numbered next-steps list.
+
+- **Session 38** (2026-07-06) - User found a second reference
+  implementation, Mustarrd (github.com/razzamatazm/mustarrd) - a
+  standalone (non-plugin) catchup-DVR app, Python/aiohttp backend. Cloned
+  it and read the actual source in depth (`xtream_client.py`,
+  `download_builder.py`, `download_manager.py`, `credential_crypto.py`,
+  `epg_ingest_manager.py`, `scheduled_manager.py`, `post_processor.py`,
+  models) via two research passes, specifically to check our most urgent
+  open question (multi-hop redirect/header handling) and to sanity-check
+  our own design choices against a second real implementation, not just
+  Sportarr. Findings folded in above (Sections 9 and 14) and summarized
+  here:
+  - **Redirect/header handling: no better answer exists elsewhere.**
+    Mustarrd uses a bare `aiohttp` GET with no custom redirect logic, no
+    cookie jar, and doesn't even set a User-Agent at all - our explicit
+    UA header is arguably more careful. Doesn't prove our headers survive
+    multi-hop redirects, but confirms there's no known-better pattern
+    we're missing.
+  - **Dialect fallback: we're ahead.** Mustarrd hardcodes one URL dialect
+    only (path-style), no fallback at all - would fail outright against
+    a php-only provider. (Curiously, `XtreamAccount` has dormant,
+    never-read `catchup_resolution_mode`/`catchup_fallback_offset_minutes`
+    columns - a fallback mechanism that appears planned but never wired
+    up.)
+  - **"Not ready" detection: found something genuinely additive.**
+    Mustarrd has no byte-size threshold at all; it sniffs `Content-Type`
+    for an error-page response before reading the body, plus a zero-byte
+    check post-transfer. Folded into Section 9 as a candidate second
+    check alongside (not replacing) our 1MB threshold.
+  - **Orphan recovery: a narrower but real idea worth taking.** Mustarrd
+    checks on-disk file size against expected size during startup
+    recovery to detect "this actually finished, just wasn't marked so" -
+    but explicitly does NOT resume partial files after a crash (only
+    mid-flight transient retries get Range-resume; crash recovery always
+    restarts from scratch for a genuinely partial file). Folded into
+    Section 9's step-12 note: check each segment's on-disk file against
+    its expected size before re-fetching, skipping ones that actually
+    completed - our segmented design already has a structural edge here
+    since a crash only ever loses one segment's progress, never the
+    whole job.
+  - **Credential leak risk: found a cautionary, validating example, not
+    a model to copy.** Mustarrd has its own redaction helpers
+    (`_friendly_error()`/`_friendly_connection_error()`, with a code
+    comment acknowledging the exact risk we got burned by) - but only
+    wired into two DB-persisted fields. Raw `str(exc)` still leaks
+    through five other sinks (WebSocket broadcast, a persisted JSONL log
+    file, a public `/epg/status` API field, a `status_message` DB
+    column, and stdout via `logger.exception`). This directly validates
+    our own Session 35 approach of auditing *every* exception handler in
+    the codebase rather than patching only the one the real test hit -
+    folded into Section 14 as an explicit ongoing rule for any future
+    exception handler added to this plugin.
+  - Also noted, not actionable right now: Mustarrd's whole-file +
+    HTTP-Range-resume download model (materially different from, not
+    clearly better than, our segmented approach for long recordings);
+    its AES-256-GCM credential-at-rest encryption (solid, but Dispatcharr
+    itself already owns credential storage for M3UAccounts - not this
+    plugin's concern); its manual-admin-set integer-hour EPG offset for
+    timezone handling (we're ahead here too, with automatic IANA
+    timezone resolution from the Xtream auth response, Section 8/10).
+  No code changes this session - design-only refinements to Sections 9
+  and 14, to be applied when step 12 is actually built. **Next:** still
+  blocked on the provider coming back up for a clean step-11 retest
+  (Session 37) - once that's clean, build step 12 incorporating both
+  the Content-Type sniff and the disk-size orphan check noted above.
