@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from django.db import close_old_connections
 
+from . import settings
 from . import state
 from . import takeover  # noqa: F401 - connects the Recording post_save receiver (Section 5 Part A)
 from . import tick
@@ -80,6 +81,12 @@ def _due_for_refresh():
 
 
 def _run_refresh_if_due():
+    if not settings.plugin_enabled():
+        # Same Session 25 rule as the takeover receiver and (as of
+        # v0.26.0) the tick thread: disabling the plugin doesn't stop
+        # this thread, so it must gate itself or a disabled plugin keeps
+        # hitting the provider daily.
+        return
     if not _due_for_refresh():
         return
     # Atomic cross-process claim (state.claim uses BEGIN IMMEDIATE) - every
@@ -238,7 +245,8 @@ class Plugin:
             "id": "run_status_tick",
             "label": "Run Status Tick Now",
             "description": (
-                "Immediately run everything the background tick does: flip "
+                "Immediately run everything the background tick does: take "
+                "over any future scheduled recordings the signal missed, flip "
                 "any taken-over recording within its air window to "
                 "'interrupted', plan segments for any recording whose window "
                 "has closed, recover any orphaned in-progress segments, and "
@@ -320,13 +328,12 @@ class Plugin:
             }
 
         if action_id == "run_status_tick":
-            tick._reap_orphaned_jobs()
-            tick._mark_interrupted_if_due()
-            tick._check_post_air_ready()
-            tick._recover_orphaned_segments()
-            tick._process_segments()
+            # The exact same pass the background loop runs (v0.26.0:
+            # includes the missed-takeover sweep) - one shared function,
+            # so this action can never drift from the real tick.
+            tick._tick_pass()
             log.info("%s status tick run manually", LOG_TAG)
-            return {"status": "ok", "message": "Status tick complete (including a real segment-fetch attempt, if one was claimable) - check logs for details."}
+            return {"status": "ok", "message": "Status tick complete (including the missed-recording sweep and a real segment-fetch attempt, if one was claimable) - check logs for details."}
 
         if action_id == "list_pending_segments":
             recording_ids = state.non_terminal_job_recording_ids()

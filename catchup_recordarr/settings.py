@@ -27,6 +27,26 @@ from ._version import LOG_TAG, PLUGIN_KEY
 logger = logging.getLogger(__name__)
 
 
+def plugin_enabled():
+    """Whether this plugin is enabled in Dispatcharr's UI. Needed because
+    neither signals nor this plugin's own background threads stop running
+    when the plugin is disabled - disabling doesn't unload the module
+    (Session 25 finding, originally applied only to the takeover
+    receiver; Session 45's requirements cross-check found the tick and
+    scheduler threads never got the same gate, so a disabled plugin kept
+    fetching from the provider). False if the config row doesn't exist
+    yet or can't be read - fail closed, matching the receiver's original
+    behavior.
+    """
+    try:
+        from apps.plugins.models import PluginConfig
+
+        cfg = PluginConfig.objects.filter(key=PLUGIN_KEY).only("enabled").first()
+        return bool(cfg and cfg.enabled)
+    except Exception:
+        return False
+
+
 def get_setting(field_id, default):
     """Raw setting value for this plugin, by field id - `default` if
     unset, or if the plugin's config row doesn't exist yet (e.g. before

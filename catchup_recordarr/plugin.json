@@ -1,6 +1,6 @@
 {
     "name": "Catchup Recordarr",
-    "version": "0.25.0",
+    "version": "0.26.0",
     "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
     "author": "James",
     "help_url": "https://github.com/jamesgallagher/CatchupRecordarr",
@@ -51,7 +51,7 @@
         {
             "id": "run_status_tick",
             "label": "Run Status Tick Now",
-            "description": "Immediately run everything the background tick does: flip any taken-over recording within its air window to 'interrupted', plan segments for any recording whose window has closed, recover any orphaned in-progress segments, and attempt one real segment fetch per ready job - instead of waiting up to 60 seconds.",
+            "description": "Immediately run everything the background tick does: take over any future scheduled recordings the signal missed, flip any taken-over recording within its air window to 'interrupted', plan segments for any recording whose window has closed, recover any orphaned in-progress segments, and attempt one real segment fetch per ready job - instead of waiting up to 60 seconds.",
             "button_label": "Run Now"
         },
         {

@@ -413,9 +413,14 @@ def claim_next_pending_segment(recording_id, min_retry_age):
       the 5-attempt cap can't exhaust itself in minutes against a
       provider that genuinely needs longer (Sessions 40-42's real-world
       finding), without needing a separate backoff-timestamp column.
-    - Refuses to claim if another of this job's segments is already
-      in_progress, preserving Section 9's strictly-sequential
-      per-job processing.
+    - Refuses to claim while ANY segment of ANY job is in_progress -
+      one in-flight provider fetch globally, not per job. Originally
+      per-job (correlated NOT EXISTS); corrected in v0.26.0 (Section
+      16's R1): Section 9's rationale for rejecting concurrency - total
+      provider load, connection slots shared with live viewing - is a
+      per-account/global concern, so two processes each fetching a
+      segment of two *different* jobs violated the design's intent even
+      though each job was individually sequential.
 
     BEGIN IMMEDIATE (same pattern as claim() below) makes the whole
     check-then-set atomic across every process that runs its own copy
@@ -436,8 +441,7 @@ def claim_next_pending_segment(recording_id, min_retry_age):
                     "WHERE recording_id = ? AND status = 'pending' "
                     "AND (retry_count = 0 OR updated_at <= ?) "
                     "AND NOT EXISTS ("
-                    "  SELECT 1 FROM segments s2 WHERE s2.recording_id = segments.recording_id "
-                    "  AND s2.status = 'in_progress'"
+                    "  SELECT 1 FROM segments s2 WHERE s2.status = 'in_progress'"
                     ") "
                     "ORDER BY idx LIMIT 1",
                     (recording_id, cutoff),

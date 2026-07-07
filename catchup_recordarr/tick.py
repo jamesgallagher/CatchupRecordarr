@@ -32,13 +32,14 @@ from django.utils import timezone
 from apps.channels.models import Recording
 
 from . import state
+from . import takeover
 from ._version import LOG_TAG
 from .archive import catchup_capable_stream_for_channel, channel_archive_retention_days
 from .download import fetch_segment
 from .planning import SEGMENT_MINUTES, plan_segments
 from .provider import resolve_provider_timezone
-from .recording import mark_recording_completed, maybe_queue_comskip
-from .settings import get_int_setting
+from .recording import mark_recording_completed, mark_recording_failed, maybe_queue_comskip
+from .settings import get_int_setting, plugin_enabled
 from .stitch import stitch_segments
 from .validate import validate_output
 
@@ -191,15 +192,11 @@ def _check_post_air_ready():
             # re-checked - no separate dedup flag needed the way the old
             # warn-only version required, since a terminal job just never
             # matches this query again.
-            reason = (
+            _fail_job(
+                rec.id,
                 f"window aged out of the provider's {retention_days}d archive "
                 f"retention before catchup fetch completed (window closed "
-                f"{now - rec.end_time} ago)"
-            )
-            state.set_job_status(rec.id, "failed", reason)
-            logger.error(
-                "%s recording %s: %s - job marked permanently failed",
-                LOG_TAG, rec.id, reason,
+                f"{now - rec.end_time} ago)",
             )
             continue
 
@@ -275,6 +272,23 @@ def _recover_orphaned_segments():
             )
 
 
+def _fail_job(rid, reason):
+    """The one place a job goes permanently failed - both halves
+    together, always: the plugin's own state store AND the native
+    Recording row (Section 10's "failure surfaced by setting
+    custom_properties['status'] = 'failed' with a reason" - specified
+    from the start, but no failure path actually did the second half
+    until Session 45's requirements cross-check caught it; the row would
+    have said "will be fetched shortly" forever).
+    """
+    state.set_job_status(rid, "failed", reason)
+    mark_recording_failed(rid, reason)
+    logger.error(
+        "%s recording %s: %s - job marked permanently failed",
+        LOG_TAG, rid, reason,
+    )
+
+
 def _fail_segment_and_maybe_job(rid, segment, error):
     """A real fetch attempt failed (both dialects). Bump the segment's
     retry_count; once it hits the cap, mark the whole *job* permanently
@@ -287,11 +301,9 @@ def _fail_segment_and_maybe_job(rid, segment, error):
     retry_count = segment["retry_count"] + 1
     state.record_segment_attempt_failure(rid, segment["idx"], error, retry_count)
     if retry_count >= MAX_SEGMENT_ATTEMPTS:
-        reason = f"segment {segment['idx']} failed after {retry_count} attempts: {error}"
-        state.set_job_status(rid, "failed", reason)
-        logger.error(
-            "%s recording %s: %s - job marked permanently failed",
-            LOG_TAG, rid, reason,
+        _fail_job(
+            rid,
+            f"segment {segment['idx']} failed after {retry_count} attempts: {error}",
         )
     else:
         logger.warning(
@@ -365,12 +377,7 @@ def _stitch_job(rid):
         # Shouldn't happen - all_segments_completed() only returns True
         # when every segment's status is 'completed', and mark_segment_completed()
         # always sets file_path in the same call. Defensive, not expected.
-        logger.error(
-            "%s recording %s: all segments marked completed but at least "
-            "one has no file_path recorded - cannot stitch",
-            LOG_TAG, rid,
-        )
-        state.set_job_status(rid, "failed", "internal error: a completed segment has no file_path")
+        _fail_job(rid, "internal error: a completed segment has no file_path recorded - cannot stitch")
         return
 
     output_path = os.path.join(state.DATA_DIR, "output", f"{rid}.mkv")
@@ -380,12 +387,7 @@ def _stitch_job(rid):
     )
     success, error = stitch_segments(segment_paths, output_path)
     if not success:
-        state.set_job_status(rid, "failed", f"stitching failed: {error}")
-        logger.error(
-            "%s recording %s: stitching failed - %s - job marked "
-            "permanently failed",
-            LOG_TAG, rid, error,
-        )
+        _fail_job(rid, f"stitching failed: {error}")
         return
 
     state.set(f"stitched_output_path:{rid}", output_path)
@@ -407,17 +409,10 @@ def _stitch_job(rid):
 
     valid, verror = validate_output(output_path, rec.end_time - rec.start_time)
     if not valid:
-        # Step 15 will turn a validation failure into a proper job-level
-        # retry policy tied to archive retention; until it exists, an
-        # immediate permanent failure with a clear reason is the correct
-        # v1 behavior - same as step 12's segment-retry-cap exhaustion -
-        # rather than silently leaving a bad file marked 'stitched'.
-        state.set_job_status(rid, "failed", f"post-stitch validation failed: {verror}")
-        logger.error(
-            "%s recording %s: post-stitch validation failed - %s - job "
-            "marked permanently failed",
-            LOG_TAG, rid, verror,
-        )
+        # An immediate permanent failure with a clear reason, same as
+        # segment-retry-cap exhaustion - never silently leave a bad file
+        # marked 'stitched'.
+        _fail_job(rid, f"post-stitch validation failed: {verror}")
         return
 
     state.set_job_status(rid, "validated")
@@ -470,6 +465,11 @@ def fetch_one_segment_now():
     human-readable status string for the action's response.
     """
     _reap_orphaned_jobs()
+    # Recover orphans before claiming: with the claim guard now global
+    # (one in-flight segment across ALL jobs, v0.26.0), a stale
+    # in_progress row left by a crash would otherwise block every manual
+    # fetch until the next background tick happened to clean it up.
+    _recover_orphaned_segments()
     backoff = _segment_retry_backoff()  # one setting read, not per job
     for rid in state.non_terminal_job_recording_ids():
         segment = state.claim_next_pending_segment(rid, backoff)
@@ -506,16 +506,32 @@ def fetch_one_segment_now():
     return "No claimable segments right now (none pending, or all mid-retry-backoff)."
 
 
+def _tick_pass():
+    """One full tick pass - shared verbatim by the background loop and
+    the manual "Run Status Tick Now" action, so the manual click can
+    never drift from what the real tick does (the same reasoning that
+    unified the fetch path in v0.18.0).
+    """
+    takeover.sweep_missed_takeovers()
+    _reap_orphaned_jobs()
+    _mark_interrupted_if_due()
+    _check_post_air_ready()
+    _recover_orphaned_segments()
+    _process_segments()
+
+
 def _tick_loop():
     time.sleep(45)
     while True:
         try:
             close_old_connections()
-            _reap_orphaned_jobs()
-            _mark_interrupted_if_due()
-            _check_post_air_ready()
-            _recover_orphaned_segments()
-            _process_segments()
+            # Disabling the plugin in the UI doesn't unload this module
+            # or stop this thread - it must gate itself, the same
+            # Session 25 rule the takeover receiver has always applied.
+            # Without this, a disabled plugin kept fetching from the
+            # provider (found by Session 45's requirements cross-check).
+            if plugin_enabled():
+                _tick_pass()
         except Exception:
             logger.exception("%s status-transition tick error", LOG_TAG)
         finally:

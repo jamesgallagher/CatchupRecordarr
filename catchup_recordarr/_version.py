@@ -1,4 +1,4 @@
-VERSION = "0.25.0"
+VERSION = "0.26.0"
 LOG_TAG = f"[Catchup v{VERSION}]"
 
 # The key this plugin is registered under (apps.plugins.models.PluginConfig.key)

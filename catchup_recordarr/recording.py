@@ -106,6 +106,55 @@ def mark_recording_completed(rec, output_path):
     return True
 
 
+def mark_recording_failed(recording_id, reason):
+    """Section 10: "Failure surfaced by setting
+    custom_properties['status'] = 'failed' with a reason string on the
+    taken-over Recording row - renders correctly through the existing
+    native UI with zero UI changes." Specified from the start, but
+    Session 45's requirements cross-check found no failure path ever
+    actually called anything like this - a permanently-failed job only
+    updated the plugin's own SQLite, leaving the native row saying
+    "Interrupted - will be fetched from the provider's catchup archive
+    shortly" forever, which becomes a lie the moment the job gives up.
+
+    Takes the id (not an instance) and loads fresh - failure sites often
+    don't have a Recording loaded, and one that was loaded earlier in
+    the pass may be stale. Merges custom_properties (same #14 rule as
+    mark_recording_completed). Returns True on success; never raises
+    (same convention as everything else in this module).
+    """
+    from apps.channels.models import Recording
+
+    rec = Recording.objects.filter(id=recording_id).first()
+    if rec is None:
+        return False  # deleted out from under us - reaper's problem, not an error
+
+    cp = dict(rec.custom_properties or {})
+    cp["status"] = "failed"
+    cp["failure_reason"] = reason
+    # Replace (never leave) the takeover-time "will be fetched shortly"
+    # text - the details modal has a display slot for this field
+    # (RecordingCard.jsx:488, #13), so this is the human-visible line.
+    cp["interrupted_reason"] = f"Catchup fetch failed permanently: {reason}"
+
+    rec.custom_properties = cp
+    try:
+        rec.save(update_fields=["custom_properties"])
+    except Exception:
+        logger.exception(
+            "%s recording %s: failed to save the Recording row as failed "
+            "(reason was: %s)",
+            LOG_TAG, recording_id, reason,
+        )
+        return False
+
+    logger.info(
+        "%s recording %s: Recording row updated to failed - %s",
+        LOG_TAG, recording_id, reason,
+    )
+    return True
+
+
 def maybe_queue_comskip(rec):
     """Queue the native comskip_process_recording task - unmodified, the
     same Celery task the live-capture pipeline calls - only when BOTH the
