@@ -48,7 +48,7 @@ may describe intent that shifts slightly once real code is written.
 
 ---
 
-## Current Status Snapshot (updated 2026-07-07, end of Session 43)
+## Current Status Snapshot (updated 2026-07-07, end of Session 44)
 
 **For picking this up on a different machine.** The Session Log below has
 the full history; this block is just the fast-orientation version.
@@ -110,6 +110,17 @@ real end-to-end test) is the only remaining build-plan item, and it
 genuinely can't be done without the user's live deployment — see its
 checklist in Section 15. Mirror this in the task list
 (`TaskCreate`/`TaskUpdate`) when resuming.
+
+**Refactor analysis exists but is deliberately unexecuted (Session 44,
+Section 16).** Fifteen ranked findings (R1–R15) from a full read-through
+of the v0.25.0 codebase — three behavior/design-conformance items (a
+cross-job concurrent-fetch gap vs Section 9's intent, a kv-row leak, and
+schema DDL running on every state call), a structural wave (tick.py god
+module, path-construction duplication, etc.), and small hygiene items.
+**Standing rule written into that section: refactor nothing until step
+20 has passed once end-to-end** — steps 12–19 have never run against a
+real recording, and refactoring unverified code removes the ability to
+tell "refactor broke it" from "it never worked."
 
 **Resolved, Session 39: a stale-job crash, distinct from the outage
 investigation below.** Retesting "Fetch One Pending Segment Now" hit
@@ -1777,6 +1788,212 @@ fully indistinguishable-but-tagged and playable in Dispatcharr).
 
 ---
 
+## Section 16 — Refactor Analysis `[~] ANALYZED (Session 44 — document only, build later)`
+
+A full read-through of everything built through v0.25.0 (steps 1–19),
+looking for refactor candidates. **Analysis only — no code changed this
+session, deliberately.** Findings are ranked and numbered (R1–R15) so a
+future session can say "do R1–R3" without re-deriving this.
+
+**Sequencing rule, more important than any individual finding: do not
+refactor anything until step 20 has passed once end-to-end.** Steps
+12–19 were built in one continuous session and have never run against a
+real recording. Refactoring unverified code destroys the one thing that
+makes refactoring safe — the ability to tell "the refactor broke it"
+apart from "it never worked." Once one recording has flowed through
+`pending → completed` and played back cleanly, that run becomes the
+baseline every refactor below is checked against. The only exception
+worth considering pre-verification is R1, because it's a
+design-conformance gap that real multi-job usage could hit *during*
+step 20 testing itself.
+
+**Codebase shape at time of analysis (v0.25.0):** 16 modules, ~2,860
+lines. Three files hold over half of it: `state.py` (582), `tick.py`
+(536), `plugin.py` (511). The remaining 13 average ~90 lines each and
+are mostly clean, single-purpose modules.
+
+### Tier A — design-conformance / behavior findings (highest value)
+
+- **R1 — Concurrent provider fetches are possible across *different*
+  jobs, violating Section 9's intent.** `state.claim_next_pending_segment()`'s
+  `NOT EXISTS` guard is correlated per-job
+  (`s2.recording_id = segments.recording_id`, state.py:439) — it
+  prevents two processes fetching segments of the *same* job, but two of
+  the ~8 processes can each claim a segment from two *different*
+  non-terminal jobs in the same minute and download concurrently.
+  Section 9's turbo-mode rejection was argued on total provider load
+  ("still exactly one connection to the provider at a time") and on
+  connection slots being shared with live viewing — both are per-account
+  concerns, not per-job ones, so the as-built guard is weaker than the
+  design's stated rationale. Rarely bites while only one job is in
+  flight at a time (the common case so far), but Series Rules can queue
+  several recordings a day. Fix options: (a) widen the claim's
+  `NOT EXISTS` to ignore the recording_id correlation (one in-flight
+  segment globally — simplest, matches Sportarr's one-at-a-time model);
+  (b) leader-gate the whole tick pass (see R7), which closes this by
+  construction. Small diff either way.
+
+- **R2 — `kv` rows leak forever when a job ends or is reaped.**
+  `delete_job()` removes the job row and cascades to segments, but the
+  per-recording kv flags — `post_air_ready_logged:{rid}`,
+  `stitched_output_path:{rid}`, plus now-orphaned legacy
+  `post_air_retention_warned:{rid}` rows from pre-v0.21.0 — are never
+  cleaned, and nothing cleans them on normal completion either. One
+  stale row per recording ever processed; harmless individually,
+  unbounded collectively, and `stitched_output_path` in particular is
+  load-bearing data hiding in a scratch table (see R10). Fix: delete
+  `%:{rid}` kv keys inside `delete_job()`, and move the output path to
+  a real column.
+
+- **R3 — Full schema DDL runs on every single state-store call.**
+  `_connect()` (state.py:86-98) executes `executescript(_SCHEMA)` — four
+  `CREATE TABLE IF NOT EXISTS` statements — plus a schema-version
+  `INSERT OR IGNORE` on **every** connection, and all 22 public
+  functions open a fresh connection per call. A single tick pass makes
+  a dozen-plus state calls; ×8 processes, that's hundreds of redundant
+  DDL executions per minute against one SQLite file, each taking the
+  write path. Correct (idempotent) but pure waste and extra lock
+  contention. Fix: run schema init once per process (module-level
+  flag), keep per-call connects DDL-free.
+
+### Tier B — structural findings (do as one wave; they touch the same lines)
+
+- **R4 — `tick.py` has become the god module, and `_stitch_job()` is
+  misnamed.** The "status-transition tick" now owns six concerns: job
+  reaping, interrupted-badge flipping, post-air detection + planning,
+  segment orphan recovery, claim/fetch orchestration, and the entire
+  finish pipeline. `_stitch_job()` (tick.py:354-443) actually does
+  stitch → validate → Recording-row update → comskip — four build steps
+  in one function whose name claims the first. Proposal: extract a
+  `pipeline.py` owning fetch-through-finalize (`_fetch_claimed_segment`,
+  `_fail_segment_and_maybe_job`, `_stitch_job` renamed `finalize_job`);
+  `tick.py` keeps only scheduling and the per-tick sweep functions. Pure
+  move-and-rename, no behavior change — which is exactly why it must
+  wait for a green step 20 baseline.
+
+- **R5 — The segment file path is constructed independently in two
+  places.** `os.path.join(state.DATA_DIR, "segments", str(rid),
+  f"segment_{idx:04d}.ts")` appears in `_recover_orphaned_segments()`
+  (tick.py:258) and `_fetch_claimed_segment()` (tick.py:333). This isn't
+  cosmetic duplication: orphan recovery's disk-existence check (the
+  Session 38 refinement) *only works* if it reconstructs exactly the
+  path the fetch used — drift here silently turns into re-download
+  loops or false "completed" marks. Extract `segment_path(rid, idx)`
+  (natural home: `state.py`, beside `DATA_DIR`, or the future
+  `pipeline.py`).
+
+- **R6 — `_fetch_claimed_segment()` returns nothing, so
+  `fetch_one_segment_now()` reverse-engineers what happened.** The
+  manual action re-queries segment + job state after the call and
+  infers the outcome from status combinations (tick.py:479-505). It
+  already has one blind spot: if the last segment fetches and stitching
+  + validation succeed but the Recording-row save fails (job left
+  `'validated'`), the message falls through to the plain "fetched
+  successfully" branch and never mentions the stitch happened. Have
+  `_fetch_claimed_segment()` return a small outcome value
+  (fetched/failed/job_failed/finalized/…) and format messages from
+  that, instead of re-deriving it.
+
+- **R7 — Two background threads with duplicated lifecycle plumbing; a
+  tick-leader claim would also fix R1.** `plugin.py`'s scheduler thread
+  and `tick.py`'s tick thread each carry their own started-flag +
+  lock + daemon-thread + `close_old_connections` try/finally loop. The
+  daily archive refresh is just an interval check against a persisted
+  timestamp — it could be one more check inside the single tick loop
+  (it already has its own cross-process claim). Separately: all ~8
+  processes run the *full* tick pass every 60s; only the atomic claims
+  keep that correct. A cheap `state.claim("tick_leader", ~2min)` gate
+  at the top of the pass would cut 7/8 of the redundant DB polling and
+  make cross-process concurrent fetches (R1) structurally impossible
+  rather than just guarded against. Keep the per-segment claims anyway
+  (defense in depth for the crash-mid-tick case).
+
+- **R8 — Catchup-capability logic exists in four near-duplicate
+  forms.** `archive.stream_is_catchup_capable()`,
+  `catchup_capable_stream_for_channel()`,
+  `channel_archive_retention_days()`, and `list_catchup_channels()`
+  (which re-implements the retention loop inline rather than calling
+  the helper), plus a fifth variant in `takeover._channel_catchup_capable()`.
+  All are loops over `channel.streams` doing `_parse_bool_ish(cp.get("tv_archive"))`
+  with slightly different filters and returns. One
+  `channel_catchup_info(channel) -> (first_capable_stream, retention_days)`
+  would serve every caller; the differences are in what they discard,
+  not what they compute.
+
+- **R9 — `plugin.py`'s `run()` is a 150-line if-chain that also
+  reaches into `tick`'s private functions.** Ten actions inline, one of
+  which (the dialect self-test) is a ~45-line embedded test suite; the
+  `run_status_tick` action calls four `tick._underscore` functions
+  directly, coupling the UI to internals. Fix: a dispatch table
+  (`{action_id: handler}`), self-test actions moved to a `selftest.py`,
+  and a public `tick.run_once()` that both the loop body and the manual
+  action share — so the manual action can never drift from what the
+  real tick does (the same reasoning that already unified the fetch
+  path in v0.18.0).
+
+- **R10 — `state.py` internals: 22 copies of the same
+  lock/connect/try/finally block, and one piece of real data living in
+  the scratch table.** A `@contextmanager def _db():` removes ~80 lines
+  of boilerplate. `stitched_output_path:{rid}` should be a
+  `jobs.output_path` column — it's a durable job attribute, not scratch
+  state, and moving it would be the first real use of the
+  `schema_version` migration machinery reserved since step 3 (bump to
+  v2, `ALTER TABLE jobs ADD COLUMN output_path TEXT`). While in there:
+  `set_job_status()` accepts any transition from anywhere; the legal
+  state machine (pending → in_progress → stitched → validated →
+  completed / → failed) exists only in comments. A transition guard —
+  or at minimum one documented constant listing legal moves — would
+  catch a future call-site bug instead of silently corrupting a
+  terminal state.
+
+### Tier C — hygiene / small polish (opportunistic, any time after step 20)
+
+- **R11** — `_try_delete()` is copy-pasted in `download.py` and
+  `stitch.py`. One tiny shared util.
+- **R12** — Release friction: every version touches 4 files in
+  lockstep + tag + zip-verify (12 releases so far, all done by hand),
+  and `plugin.json`'s `fields`/`actions` are hand-duplicated from
+  `plugin.py`. A small `release.py` (bump, sync/generate plugin.json,
+  tag, verify) removes the recurring "forgot one of the four files"
+  risk entirely.
+- **R13** — Diagnostic gap found while re-reading `download.py`: the
+  "not ready" paths (0 bytes / under-1MB / wrong Content-Type) don't
+  include `describe_redirect_chain(resp)` even though the response
+  object is in hand — only *exception* paths get the chain. Sessions
+  40–42's 0-byte mystery is exactly the case where seeing the redirect
+  chain on a "successful" empty response would have helped. Borderline
+  feature rather than refactor, but one line of real diagnostic value.
+- **R14** — `planning.py` nit: `round()` on a fractional final segment
+  can request up to 30s past `window_end` (e.g. a 7.5-min remainder
+  rounds to 8), contradicting the docstring's "never requests past
+  window_end." Harmless in practice (absorbed by padding and the
+  provider's own windowing); fix the docstring or ceil the duration.
+- **R15** — Naming, only worth doing if R4's reshuffle happens anyway:
+  `settings.py` invites confusion with Django settings; `recording.py`
+  vs the `Recording` model; `archive.py` mixes flag-refresh (network)
+  with capability queries (pure reads).
+
+### Explicitly *not* worth refactoring
+
+`timeshift.py`, `dialect.py`, `errors.py`, `provider.py`,
+`validate.py`, `stitch.py` internals, `planning.py`'s structure, the
+takeover receiver's guard ordering, and the segment state machine
+semantics. All small, single-purpose, and either verified against real
+fixtures (timeshift URLs byte-for-byte vs Sportarr's tests) or proven
+on the live deployment (takeover, dialect fallback). Churning proven
+code before the unproven code is verified would be backwards.
+
+### Suggested execution order (a later session's worth of work)
+
+1. Step 20 passes once end-to-end → baseline established.
+2. Tier A (R1–R3): small, independent, each its own version bump.
+3. Tier B as one coordinated wave (R4–R10 overlap heavily — R4's
+   `pipeline.py` extraction is the natural moment for R5, R6, and R15;
+   R7's thread merge is the natural moment for R9's `tick.run_once()`).
+4. Tier C opportunistically alongside whatever else is being touched.
+
+---
+
 ## Session Log
 
 *(Append an entry each session — date, what was decided/built, what's next.
@@ -2943,3 +3160,53 @@ diverges from the sections above.)*
   the same instruction to keep building through what doesn't depend on
   that answer - step 20 itself can't be *completed* without the user's
   own real deployment, but the checklist/manual-action groundwork can.
+
+- **Session 44** (2026-07-07) - Refactor analysis at the user's request:
+  full read-through of everything built through v0.25.0, **analyze and
+  document only, no code changed** - deliberately, since steps 12-19
+  have never run against a real recording and refactoring unverified
+  code removes the ability to tell "refactor broke it" from "it never
+  worked." Written up as new Section 16 with fifteen ranked findings
+  (R1-R15) so a later session can execute them by number. Highlights:
+  - **R1 (the one genuine design-conformance gap):**
+    `claim_next_pending_segment()`'s NOT EXISTS guard is correlated
+    per-job, so two processes can concurrently fetch segments of two
+    *different* jobs - Section 9's "one connection to the provider at a
+    time" rationale was per-account/total, not per-job, so the as-built
+    guard is weaker than the design's stated intent. Rarely bites with
+    one job in flight, but Series Rules can queue several a day.
+  - **R2:** per-recording kv rows (`post_air_ready_logged:`,
+    `stitched_output_path:`, legacy `post_air_retention_warned:`) leak
+    forever - `delete_job()` cascades segments but never cleans kv, and
+    nothing cleans on normal completion either.
+  - **R3:** `state._connect()` runs the full 4-table schema DDL on
+    every single call, and all 22 public functions open a fresh
+    connection - hundreds of redundant DDL executions per minute across
+    ~8 processes.
+  - **R4-R10 (structural wave):** tick.py is now a 536-line god module
+    with `_stitch_job()` doing stitch+validate+complete+comskip under a
+    name claiming the first; segment paths built independently in two
+    places (drift there breaks orphan recovery silently); the manual
+    fetch action reverse-engineers outcomes instead of receiving them;
+    two background threads with duplicated lifecycle plumbing (a
+    tick-leader claim would also close R1 by construction);
+    catchup-capability logic in five near-duplicate forms;
+    plugin.py's 150-line action if-chain reaching into tick._privates;
+    state.py's 22 copies of connection boilerplate and
+    `stitched_output_path` living in kv instead of a jobs column (the
+    natural first schema_version=2 migration).
+  - **R11-R15 (hygiene):** duplicated `_try_delete`, the 4-file manual
+    release lockstep (a release script candidate), a real diagnostic
+    gap (0-byte "not ready" responses don't log the redirect chain even
+    though the response is in hand - exactly what Sessions 40-42
+    needed), a `round()` nit letting a fractional final segment request
+    ~30s past window_end, and naming cleanups.
+  - Also documented what's explicitly *not* worth refactoring (the
+    small proven modules: timeshift/dialect/errors/provider/validate/
+    stitch) and a suggested execution order: step 20 baseline first,
+    then Tier A as independent bumps, then Tier B as one coordinated
+    wave, Tier C opportunistically. Docs-only commit, no version bump.
+  **Next:** unchanged - step 20 (real-world E2E validation per its
+  checklist in Section 15) is the gate for everything, including this
+  refactor work. Once one recording flows `pending -> completed` and
+  plays back cleanly, execute Section 16 starting with Tier A.
