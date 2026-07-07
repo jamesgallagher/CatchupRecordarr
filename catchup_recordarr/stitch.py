@@ -26,6 +26,7 @@ import os
 import subprocess
 
 from ._version import LOG_TAG
+from .fsutil import try_delete
 
 logger = logging.getLogger(__name__)
 
@@ -79,25 +80,17 @@ def stitch_segments(segment_paths, output_path):
             # files, no network call) - safe to include directly, unlike
             # the provider-facing exceptions Section 14 is about.
             stderr_tail = result.stderr.decode("utf-8", errors="replace")[-2000:]
-            _try_delete(part_output)
+            try_delete(part_output)
             return False, f"ffmpeg concat failed (exit {result.returncode}): {stderr_tail}"
 
         if not os.path.exists(part_output) or os.path.getsize(part_output) == 0:
-            _try_delete(part_output)
+            try_delete(part_output)
             return False, "ffmpeg concat produced no output"
 
         os.replace(part_output, output_path)
         return True, None
     except OSError as exc:
-        _try_delete(part_output)
+        try_delete(part_output)
         return False, f"local I/O error during stitching: {exc}"
     finally:
-        _try_delete(list_path)
-
-
-def _try_delete(path):
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-    except OSError:
-        pass
+        try_delete(list_path)

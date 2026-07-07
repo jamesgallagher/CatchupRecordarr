@@ -6,7 +6,7 @@ finally puts fetch_with_fallback()'s injected callback to real use - no
 mock fetch functions past this point.
 
 Orchestration (claiming the next pending segment for a job, updating
-segment status, retry caps, orphan recovery) lives in tick.py (step 12)
+segment status, retry caps, orphan recovery) lives in pipeline.py/tick.py
 - this module only knows how to fetch ONE already-chosen segment.
 """
 
@@ -18,6 +18,7 @@ import requests
 from ._version import LOG_TAG
 from .dialect import fetch_with_fallback
 from .errors import describe_redirect_chain, safe_error_string
+from .fsutil import try_delete
 from .provider import resolve_user_agent
 from .timeshift import build_timeshift_url
 
@@ -100,7 +101,10 @@ def _download(url, user_agent, dest_path):
                 # error/status page, not video data. Content-Type is a
                 # response header value, never the request URL or
                 # credentials, safe to include directly (Section 14).
-                return False, f"archive returned a non-video response (Content-Type: '{content_type}')"
+                return False, _with_chain(
+                    f"archive returned a non-video response (Content-Type: '{content_type}')",
+                    resp,
+                )
             with open(part_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=64 * 1024):
                     if chunk:
@@ -108,7 +112,7 @@ def _download(url, user_agent, dest_path):
     except requests.exceptions.RequestException as exc:
         # Never str(exc) here - requests exceptions commonly embed the
         # full request URL, including credentials.
-        _try_delete(part_path)
+        try_delete(part_path)
         message = safe_error_string(exc)
         chain = describe_redirect_chain(getattr(exc, "response", None))
         if chain:
@@ -120,21 +124,29 @@ def _download(url, user_agent, dest_path):
     except OSError as exc:
         # Local I/O error (disk full, permission denied) - safe to show
         # directly, it never carries the provider URL.
-        _try_delete(part_path)
+        try_delete(part_path)
         return False, f"local I/O error writing segment: {exc}"
 
     size = os.path.getsize(part_path) if os.path.exists(part_path) else 0
     if size < NOT_READY_THRESHOLD_BYTES:
-        _try_delete(part_path)
-        return False, f"archive returned only {size} bytes - window likely not available yet"
+        try_delete(part_path)
+        return False, _with_chain(
+            f"archive returned only {size} bytes - window likely not available yet",
+            resp,
+        )
 
     os.replace(part_path, dest_path)
     return True, None
 
 
-def _try_delete(path):
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-    except OSError:
-        pass
+def _with_chain(message, resp):
+    """Append the credential-free redirect chain to a "not ready"
+    classification (Section 16 R13). Previously only *exception* paths
+    got the chain - but Sessions 40-42's real-world mystery was a
+    *successful* 2xx response with an empty body, exactly the case where
+    seeing which host/path actually served the response matters most.
+    Safe by construction: describe_redirect_chain strips every query
+    string (where credentials/tokens live) via urlsplit.
+    """
+    chain = describe_redirect_chain(resp)
+    return f"{message} ({chain})" if chain else message

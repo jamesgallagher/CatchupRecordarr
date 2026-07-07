@@ -7,6 +7,7 @@ sequentially (Section 9 - never concurrently, see design.md's turbo-mode
 discussion). Planning only for this step - no fetching yet (step 11).
 """
 
+import math
 from datetime import timedelta
 
 # Section 9: "15 or 30 min". 15 chosen as the default - matches the
@@ -18,8 +19,15 @@ SEGMENT_MINUTES = 15
 def plan_segments(window_start, window_end, segment_minutes=SEGMENT_MINUTES):
     """Return [(index, start, duration_minutes), ...] covering
     [window_start, window_end) in fixed segment_minutes chunks. The
-    final segment is shortened to fit exactly - it never requests past
-    window_end.
+    final segment is shortened to fit, rounded UP to whole minutes
+    (timeshift duration granularity is minutes) - so a fractional-minute
+    window's last segment may request up to 59s past window_end rather
+    than dropping up to 59s of content (Section 16 R14: the previous
+    round() sat ambiguously between the two and the docstring claimed
+    "never past window_end", which minute granularity can't guarantee;
+    over-requesting is the right side to land on - the tail overshoot is
+    absorbed by validation's own ±2min tolerance and mirrors the design's
+    padding philosophy of preferring a little extra over truncation).
     """
     if window_end <= window_start:
         return []
@@ -31,7 +39,7 @@ def plan_segments(window_start, window_end, segment_minutes=SEGMENT_MINUTES):
     while cursor < window_end:
         remaining = window_end - cursor
         this_delta = min(delta, remaining)
-        duration_minutes = max(1, round(this_delta.total_seconds() / 60))
+        duration_minutes = max(1, math.ceil(this_delta.total_seconds() / 60))
         segments.append((idx, cursor, duration_minutes))
         cursor = cursor + delta
         idx += 1

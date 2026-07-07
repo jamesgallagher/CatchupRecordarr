@@ -29,7 +29,7 @@ from apps.channels.signals import revoke_task
 
 from . import state
 from ._version import LOG_TAG
-from .archive import stream_is_catchup_capable
+from .archive import channel_catchup_info
 from .settings import plugin_enabled
 
 logger = logging.getLogger(__name__)
@@ -42,18 +42,13 @@ DISPATCH_UID = "catchup_recordarr_takeover"
 
 def _channel_catchup_capable(channel):
     """True if any of the channel's streams belongs to an active XC account
-    and carries an archive flag. Checked in Python rather than a JSON
-    filter: values are stored as strings in custom_properties and the
-    per-channel stream count is small.
+    and carries an archive flag (archive.channel_catchup_info - the one
+    shared capability check, Section 16 R8). The try/except stays here:
+    the receiver path fires on every Recording save and must never let a
+    capability-check error propagate into core's save flow.
     """
-    if channel is None:
-        return False
     try:
-        streams = channel.streams.filter(
-            m3u_account__account_type="XC",
-            m3u_account__is_active=True,
-        )
-        return any(stream_is_catchup_capable(s) for s in streams)
+        return channel_catchup_info(channel)[0] is not None
     except Exception:
         logger.exception(
             "%s takeover: capability check failed for channel %s",

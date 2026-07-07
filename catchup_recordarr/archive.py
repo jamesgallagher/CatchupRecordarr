@@ -35,35 +35,54 @@ def stream_is_catchup_capable(stream):
     return _parse_bool_ish(cp.get("tv_archive", 0))
 
 
-def catchup_capable_stream_for_channel(channel):
-    """The channel's first catchup-capable stream on an active XC account,
-    or None. Same eligibility gate as stream_is_catchup_capable, resolved
-    down to the actual Stream object (not just a bool) - needed once
-    something has to actually fetch from it (stream_id, m3u_account).
+def channel_catchup_info(channel):
+    """The one capability check (Section 16 R8 - previously five
+    near-duplicate loops across archive.py and takeover.py, each with
+    slightly different filters). Returns
+    (first_capable_stream_or_None, retention_days) in a single pass over
+    the channel's active-XC streams.
+
+    Note a deliberate unification: the old channel_archive_retention_days
+    looped ALL streams while the stream-resolving variant filtered to
+    active XC accounts - so retention could be sourced from a stream on
+    a disabled account that fetching would never use. Both now use the
+    active-XC set consistently.
     """
+    if channel is None:
+        return None, 0
+    stream_found = None
+    days = 0
     for s in channel.streams.filter(
         m3u_account__account_type="XC", m3u_account__is_active=True
     ):
-        if stream_is_catchup_capable(s):
-            return s
-    return None
+        cp = s.custom_properties or {}
+        if not _parse_bool_ish(cp.get("tv_archive", 0)):
+            continue
+        if stream_found is None:
+            stream_found = s
+        try:
+            days = max(days, int(cp.get("tv_archive_duration", 0)))
+        except (TypeError, ValueError):
+            pass
+    return stream_found, days
+
+
+def catchup_capable_stream_for_channel(channel):
+    """The channel's first catchup-capable stream on an active XC account,
+    or None - needed once something has to actually fetch (stream_id,
+    m3u_account). Thin wrapper over channel_catchup_info().
+    """
+    return channel_catchup_info(channel)[0]
 
 
 def channel_archive_retention_days(channel):
     """Max tv_archive_duration across the channel's catchup-capable
-    streams, 0 if none - the outer edge of Section 5 Part B's lookback
-    window (no point treating a window as fetchable once it's aged out
-    of the provider's own archive retention).
+    streams, 0 if none - the outer edge of the fetchable window (no
+    point treating a window as fetchable once it's aged out of the
+    provider's own archive retention). Thin wrapper over
+    channel_catchup_info().
     """
-    days = 0
-    for s in channel.streams.all():
-        cp = s.custom_properties or {}
-        if _parse_bool_ish(cp.get("tv_archive", 0)):
-            try:
-                days = max(days, int(cp.get("tv_archive_duration", 0)))
-            except (TypeError, ValueError):
-                pass
-    return days
+    return channel_catchup_info(channel)[1]
 
 
 def list_catchup_channels():
@@ -85,17 +104,8 @@ def list_catchup_channels():
 
     results = []
     for channel in channels:
-        capable = False
-        days = 0
-        for s in channel.streams.all():
-            cp = s.custom_properties or {}
-            if _parse_bool_ish(cp.get("tv_archive", 0)):
-                capable = True
-                try:
-                    days = max(days, int(cp.get("tv_archive_duration", 0)))
-                except (TypeError, ValueError):
-                    pass
-        if capable:
+        stream, days = channel_catchup_info(channel)
+        if stream is not None:
             results.append((channel.channel_number, channel.name, days))
     return results
 

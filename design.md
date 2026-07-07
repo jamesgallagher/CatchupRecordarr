@@ -48,7 +48,7 @@ may describe intent that shifts slightly once real code is written.
 
 ---
 
-## Current Status Snapshot (updated 2026-07-07, end of Session 44)
+## Current Status Snapshot (updated 2026-07-07, end of Session 45)
 
 **For picking this up on a different machine.** The Session Log below has
 the full history; this block is just the fast-orientation version.
@@ -70,7 +70,7 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.25.0**, pushed and tag-verified reachable.
+- Current version: **v0.27.0**, pushed and tag-verified reachable.
 - **Resolved, Session 43 (step 18): both are now real, independent
   settings, not hardcoded constants.** `grace_period_minutes` and
   `segment_retry_backoff_minutes` are configurable `Plugin.fields`
@@ -111,16 +111,39 @@ genuinely can't be done without the user's live deployment — see its
 checklist in Section 15. Mirror this in the task list
 (`TaskCreate`/`TaskUpdate`) when resuming.
 
-**Refactor analysis exists but is deliberately unexecuted (Session 44,
-Section 16).** Fifteen ranked findings (R1–R15) from a full read-through
-of the v0.25.0 codebase — three behavior/design-conformance items (a
-cross-job concurrent-fetch gap vs Section 9's intent, a kv-row leak, and
-schema DDL running on every state call), a structural wave (tick.py god
-module, path-construction duplication, etc.), and small hygiene items.
-**Standing rule written into that section: refactor nothing until step
-20 has passed once end-to-end** — steps 12–19 have never run against a
-real recording, and refactoring unverified code removes the ability to
-tell "refactor broke it" from "it never worked."
+**Refactor executed (Session 45, v0.26.0–v0.27.0), overriding Section
+16's own "wait for step 20" sequencing rule at the user's explicit
+instruction** — the tradeoff was surfaced and accepted: the refactored
+code is now the code step 20 will validate, so a step-20 failure can no
+longer be cleanly attributed to "pre-refactor logic" vs "the refactor."
+Mitigation: two granular releases (conformance fixes separate from the
+structural wave), every move behavior-preserving where possible.
+- **v0.26.0** — requirements-conformance fixes from a full
+  code-vs-design cross-check, three of which were *new* findings beyond
+  Section 16: C1 (the missed-takeover sweep from Session 25 was never
+  built — now `takeover.sweep_missed_takeovers()`, run every tick), C2
+  (background threads never checked `PluginConfig.enabled` — a disabled
+  plugin kept fetching from the provider), C3 (permanent failures never
+  reached the native Recording row per Section 10 — the UI said "will be
+  fetched shortly" forever; now `mark_recording_failed()` via one shared
+  `fail_job()`), plus R1 (segment claim guard now global, not per-job).
+- **v0.27.0** — the Section 16 wave: R2–R11, R13, R14 executed (see
+  Section 16 for per-item status). Headlines: new `pipeline.py` owns
+  fetch→stitch→validate→finalize with outcome-dict returns; `tick.py` is
+  scheduling only, leader-gated (one process runs each pass instead of
+  ~8), with the old scheduler thread merged in; `state.py` rewritten
+  (schema init once per process, `_db()` contextmanager, schema **v2**
+  migration moving `output_path` into the jobs table, kv cleanup on
+  delete); `plugin.py` is a dispatch table with self-tests in
+  `selftest.py`. Two *new* fixes found during extraction: jobs left at
+  `stitched`/`validated` by a crash mid-finalize now resume
+  (`resume_stalled_finalizes()` — previously stuck forever), and segment
+  `.ts` files are now deleted after a successful stitch (previously
+  every completed recording kept a full duplicate of itself on disk
+  permanently). Not done: R12 (release tooling — dev tooling, not the
+  app), R15 (renames beyond what the extraction naturally did).
+**Step 20 (real-world E2E) is now even more load-bearing than before**
+— it validates both the steps 12–19 build AND this refactor in one run.
 
 **Resolved, Session 39: a stale-job crash, distinct from the outage
 investigation below.** Retesting "Fetch One Pending Segment Now" hit
@@ -1788,7 +1811,21 @@ fully indistinguishable-but-tagged and playable in Dispatcharr).
 
 ---
 
-## Section 16 — Refactor Analysis `[~] ANALYZED (Session 44 — document only, build later)`
+## Section 16 — Refactor Analysis `[x] EXECUTED (Session 45, v0.26.0–v0.27.0 — R1–R11, R13, R14 done; R12/R15 deliberately skipped)`
+
+**Execution status (Session 45):** R1 (global claim guard, v0.26.0);
+R2/R3/R5/R10 (state.py rewrite: kv cleanup, init-once schema,
+`segment_path()`/`job_output_path()` helpers, `_db()` contextmanager,
+schema v2 `output_path` column + migration, terminal-status transition
+guard); R4/R6 (`pipeline.py` extraction, `finalize_job` rename, outcome
+dicts); R7 (scheduler thread merged into one leader-gated tick); R8
+(`channel_catchup_info()` consolidation — note it also unified retention
+to active-XC streams only, a small deliberate behavior change); R9
+(dispatch table + `selftest.py` + public `tick.run_once()`); R11
+(`fsutil.try_delete`); R13 (redirect chain on not-ready responses); R14
+(ceil + honest docstring). **Skipped:** R12 (release script — dev
+tooling, not the shipped app), R15 (naming churn beyond what R4's
+extraction did naturally). The original analysis follows unchanged.
 
 A full read-through of everything built through v0.25.0 (steps 1–19),
 looking for refactor candidates. **Analysis only — no code changed this
@@ -3210,3 +3247,78 @@ diverges from the sections above.)*
   checklist in Section 15) is the gate for everything, including this
   refactor work. Once one recording flows `pending -> completed` and
   plays back cleanly, execute Section 16 starting with Tier A.
+
+- **Session 45** (2026-07-07) - Full analysis + refactor execution at
+  the user's explicit request ("refactor where it would make the app
+  better, cross check code against requirements and sense check
+  methodology") - consciously overriding Section 16's own "wait for
+  step 20" rule; the tradeoff (step 20 now validates the build and the
+  refactor together, no clean attribution if it fails) was accepted in
+  exchange for correctness fixes landing before real-world testing.
+  Two releases:
+  - **v0.26.0 - requirements cross-check fixes.** Reading every design
+    requirement against the code found three conformance gaps Section
+    16's structural analysis had missed, all now fixed:
+    - **C1:** Session 25's known gap - a catch-up sweep for recordings
+      scheduled while the plugin was disabled/before install - was
+      deferred to step 6 and *never built* (step 6 only built post-air
+      detection; Session 41 hit the gap live and initially misread it as
+      a takeover bug). Built: `takeover.attempt_takeover()` extracted as
+      the shared core, `sweep_missed_takeovers()` runs every tick pass.
+    - **C2:** the Session 25 "disabled plugins must gate themselves"
+      rule was applied to the signal receiver but never to the
+      background threads - a disabled plugin kept ticking, fetching
+      from the provider, and refreshing archive flags. Both threads now
+      gate on `PluginConfig.enabled` (`settings.plugin_enabled()`).
+    - **C3:** Section 10 requires failure surfaced on the Recording row
+      (`status="failed"` + reason); no failure path ever did it - the
+      native UI showed "will be fetched shortly" forever on a
+      permanently failed job. Built `recording.mark_recording_failed()`,
+      called from one shared `fail_job()` at every failure site.
+    - Plus Section 16's **R1**: the segment-claim NOT EXISTS guard is
+      now global rather than per-job - one in-flight provider fetch
+      total, matching Section 9's per-account rationale.
+  - **v0.27.0 - the Section 16 wave** (R2-R11, R13, R14; R12/R15
+    deliberately skipped as dev-tooling/naming churn). New `pipeline.py`
+    owns fetch->stitch->validate->finalize with outcome-dict returns
+    (R4/R6); `tick.py` is scheduling-only and **leader-gated** - one
+    process runs each pass instead of all ~8, closing R1 a second way
+    and cutting 7/8 of DB polling - with plugin.py's scheduler thread
+    merged in (R7); `state.py` rewritten: schema DDL once per process
+    (R3), `_db()` contextmanager replacing 22 boilerplate blocks (R10),
+    **schema v2** - `output_path` becomes a jobs column with a real
+    migration (the machinery reserved at step 3, exercised for the
+    first time), kv flags cleaned on job deletion (R2), path helpers
+    (R5), and a terminal-status transition guard. `plugin.py` became a
+    dispatch table with self-tests extracted to `selftest.py` and the
+    manual tick action now calling the public `tick.run_once()` (R9).
+    `archive.channel_catchup_info()` replaced five near-duplicate
+    capability loops (R8 - also unifying retention to active-XC streams
+    only, a small deliberate behavior change). Diagnostics: "not ready"
+    responses now include the credential-free redirect chain (R13 -
+    exactly what Sessions 40-42's 0-byte mystery needed);
+    `planning.py` ceils fractional final segments with an honest
+    docstring (R14); shared `fsutil.try_delete` (R11).
+    **Two new fixes found during extraction, not in the original
+    analysis:** (1) a job left at `stitched`/`validated` by a crash
+    mid-finalize (or a failed Recording-row save) previously had
+    *nothing* to ever re-trigger the remaining stages - stuck forever;
+    `pipeline.resume_stalled_finalizes()` now resumes it each pass,
+    with `finalize_job()` skipping already-completed stages via the
+    atomic-rename existence guarantees. (2) segment `.ts` files were
+    never deleted after a successful stitch - every completed recording
+    permanently kept a byte-for-byte duplicate of itself on disk;
+    cleaned on success now (kept on failure, for diagnosis).
+  Methodology sense-check (documented, no change needed): ISO-string
+  ordering in the claim cutoff is sound (same format/offset both
+  sides); `requests`' 60s timeout is per-read, not total, so
+  slow-but-flowing segment pulls won't false-abort; validation's
+  expected duration and planning's window both derive from the same
+  padding-adjusted Recording times, so they can't drift apart.
+  Both versions pushed and tag-verified. **Next:** step 20 - now
+  validating the build AND the refactor in one run. Update to v0.27.0,
+  wait for a TiViMate-confirmed-available archive window, and run the
+  Section 15 checklist end-to-end. Expect the v0.27.0 logs to differ
+  from earlier versions in one visible way: only ONE process logs each
+  tick pass now (leader-gated), instead of the same line appearing from
+  several PIDs.
