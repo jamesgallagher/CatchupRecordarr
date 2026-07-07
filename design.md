@@ -48,7 +48,7 @@ may describe intent that shifts slightly once real code is written.
 
 ---
 
-## Current Status Snapshot (updated 2026-07-07, end of Session 39)
+## Current Status Snapshot (updated 2026-07-07, end of Session 40)
 
 **For picking this up on a different machine.** The Session Log below has
 the full history; this block is just the fast-orientation version.
@@ -70,7 +70,12 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.17.2**, pushed and tag-verified reachable.
+- Current version: **v0.17.3**, pushed and tag-verified reachable.
+- **`tick.py`'s `GRACE_PERIOD` is temporarily 5 minutes, not the real
+  15-minute default** — a deliberate, flagged debug-speed change
+  (Session 40), not a design decision. Revert to `timedelta(minutes=15)`
+  once the real live→timeshift archive lag is known, or once step 11/12
+  debugging wraps up, whichever comes first.
 
 **Build progress:** steps 1–10 of Section 15's build plan are done; step
 11 (single-segment fetch) is functionally built and *has* successfully
@@ -2395,3 +2400,21 @@ diverges from the sections above.)*
   remain, or report "No pending segments found." Otherwise unchanged
   from Session 38's Snapshot: once a clean provider-up retest of step 11
   succeeds, build step 12.
+
+- **Session 40** (2026-07-07) - User asked whether `tick.py`'s
+  `GRACE_PERIOD` (post-air detection buffer, Section 5 Part B) could be
+  temporarily shortened from 15 to 5 minutes to speed up debugging
+  iteration, since the real live→timeshift archive lag isn't known yet
+  and 15 minutes may turn out to be more buffer than actually needed.
+  Changed `GRACE_PERIOD = timedelta(minutes=5)` with an inline comment
+  flagging it as temporary and pointing back here, rather than silently
+  changing the "real" value - this is a debug-convenience change, not a
+  design decision, and should not be mistaken for one by a future
+  session. Bumped to v0.17.3, pushed, tag-verified reachable. **Next:**
+  user updates to v0.17.3; recordings become eligible for "ready for
+  catchup fetch" 5 minutes after `end_time` instead of 15 while this is
+  in effect. Revert `GRACE_PERIOD` back to 15 minutes once real-world
+  testing establishes the actual archive-finalization lag, or once
+  step 11/12 debugging wraps up - whichever comes first. Otherwise
+  unchanged: still waiting on a clean provider-up retest of step 11
+  (Sessions 37-39) before building step 12.

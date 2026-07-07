@@ -46,7 +46,11 @@ INTERRUPTED_REASON = (
 # finalize the tail of the broadcast. Hardcoded for now, same reasoning
 # as Section 8's "not ready" threshold: add a setting only if real-world
 # testing shows it needs tuning.
-GRACE_PERIOD = timedelta(minutes=15)
+#
+# TEMPORARILY 5 minutes (Session 40) for faster iteration while debugging
+# step 11/12 - real value is 15 minutes, revert once the live->timeshift
+# lag is actually known. See design.md Session 40.
+GRACE_PERIOD = timedelta(minutes=5)
 
 _tick_started = False
 _tick_lock = threading.Lock()
