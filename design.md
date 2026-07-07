@@ -48,7 +48,7 @@ may describe intent that shifts slightly once real code is written.
 
 ---
 
-## Current Status Snapshot (updated 2026-07-07, end of Session 41)
+## Current Status Snapshot (updated 2026-07-07, end of Session 42)
 
 **For picking this up on a different machine.** The Session Log below has
 the full history; this block is just the fast-orientation version.
@@ -141,13 +141,25 @@ the original 15-minute default assumed, and this is the same provider
 (`xapi-ie.org`/account `JVRTFz5dn6`) flagged as having intermittent
 outages in Sessions 37–38, so it's not yet possible to tell "this
 provider's archive genuinely takes this long to finalize" apart from
-"this provider is still flaky." **Not yet resolved — next step is more
-data, not a code or config change:** retry the same recording at longer
-intervals (30 min, 60 min, next day) and see when/if it actually
-succeeds. Whatever interval actually works should become the *real*
-`GRACE_PERIOD` value (replacing both the 5-minute debug value and the
-original 15-minute guess), logged here as an empirically-established
-constant rather than a borrowed default once known.
+"this provider is still flaky."
+
+**Session 42 update — narrowed, not yet resolved.** The user
+independently tried the same window (recording 33, Sky Sports Mix FHD)
+in **TiViMate**, the reference client confirmed working against this
+provider (Session 37) — it also failed to play the archive back. This
+is a genuinely useful negative result: it rules out our own request
+(headers/cookies/redirect handling, the open question from Session 37)
+as the explanation, since a known-working client hits the identical
+wall right now. What's left is squarely "the provider's archive isn't
+available for this window yet" — either normal finalization lag longer
+than assumed, or the provider still being flaky per Sessions 37–38; still
+can't distinguish those two from here. **Plan, per the user: wait, and
+once TiViMate successfully plays the window back, immediately retest
+"Fetch One Pending Segment Now" against the same window.** That moment
+gives us two things at once — confirmation our fetch works against a
+provably-available archive window, and a real number for how long this
+provider actually takes, to replace both the Session 40 debug value and
+the original 15-minute guess.
 
 **Resolved this session (Sessions 35–36): a real credential leak.**
 `requests` exceptions embed the full request URL (including Xtream
@@ -2509,3 +2521,30 @@ diverges from the sections above.)*
   should see clean logs going forward with no more unregistered-task
   errors. Once a real lag value is known, update `GRACE_PERIOD`
   permanently and move to closing out step 11.
+
+- **Session 42** (2026-07-07) - v0.17.4 confirmed clean on restart: no
+  more `unregistered task` errors (the legacy `PeriodicTask` cleanup
+  worked), archive refresh and status tick both started normally. A
+  fourth fetch attempt on recording 33 (~26 minutes post-air) still
+  returned 0 bytes from both dialects, extending but not resolving the
+  open question from Session 41. At the user's suggestion, cross-checked
+  against **TiViMate** (the reference client confirmed working against
+  this same provider, Session 37) by trying to play back the identical
+  window (recording 33, Sky Sports Mix FHD, ~02:15-02:30 UTC) - it also
+  failed. This is a genuinely useful negative result, not a null one: it
+  rules out our own request handling (the headers/cookies-across-redirect
+  question flagged in Session 37) as the explanation, since a
+  known-working client hits the same wall right now. What's left is
+  squarely provider-side - either normal archive-finalization lag longer
+  than assumed, or the provider still being flaky per Sessions 37-38;
+  still can't distinguish those two. No code changes this session -
+  design-only update to the Snapshot's open item, capturing the narrowed
+  diagnosis. **Next, per the user's own plan:** wait; once TiViMate
+  successfully plays the window back, immediately retest "Fetch One
+  Pending Segment Now" against the same window. That moment gives two
+  things at once - confirmation the fetch works against a
+  provably-available window, and a real number for `GRACE_PERIOD` to
+  replace both the Session 40 debug value and the original 15-minute
+  guess. Also still outstanding from Session 41: confirming via "List
+  Catchup Channels" whether the original stuck recording's channel (and
+  "NZ SKY Sport SELECT") are simply non-catchup-capable.
