@@ -37,6 +37,7 @@ from .archive import catchup_capable_stream_for_channel, channel_archive_retenti
 from .download import fetch_segment
 from .planning import SEGMENT_MINUTES, plan_segments
 from .provider import resolve_provider_timezone
+from .recording import mark_recording_completed
 from .stitch import stitch_segments
 from .validate import validate_output
 
@@ -383,7 +384,7 @@ def _stitch_job(rid):
     # Step 14 - validate before this is ever allowed to look finished
     # (Section 7's ordering rule: never mark something completed until
     # it's fully downloaded, stitched, AND verified).
-    rec = Recording.objects.filter(id=rid).only("start_time", "end_time").first()
+    rec = Recording.objects.select_related("channel").filter(id=rid).first()
     if rec is None:
         # _reap_orphaned_jobs() normally catches a deleted Recording
         # before we ever get this far, but handle the gap defensively
@@ -392,14 +393,7 @@ def _stitch_job(rid):
         return
 
     valid, verror = validate_output(output_path, rec.end_time - rec.start_time)
-    if valid:
-        # 'validated' - still not Section 7's 'completed' (that's the
-        # native Recording row's own status field, set by step 16 once
-        # it actually updates that row) - this is our own internal
-        # state's last non-terminal stop before step 16 exists.
-        state.set_job_status(rid, "validated")
-        logger.info("%s recording %s: post-stitch validation passed", LOG_TAG, rid)
-    else:
+    if not valid:
         # Step 15 will turn a validation failure into a proper job-level
         # retry policy tied to archive retention; until it exists, an
         # immediate permanent failure with a clear reason is the correct
@@ -411,6 +405,18 @@ def _stitch_job(rid):
             "marked permanently failed",
             LOG_TAG, rid, verror,
         )
+        return
+
+    state.set_job_status(rid, "validated")
+    logger.info("%s recording %s: post-stitch validation passed", LOG_TAG, rid)
+
+    # Step 16 - update the native Recording row now that everything is
+    # fully downloaded, stitched, AND verified (Section 7's ordering
+    # rule). Moves our own internal job status to a genuinely terminal
+    # 'completed' - the first real use of that status value since it was
+    # reserved in the schema back in step 3.
+    mark_recording_completed(rec, output_path)
+    state.set_job_status(rid, "completed")
 
 
 def _process_segments():
@@ -449,12 +455,13 @@ def fetch_one_segment_now():
         )
         job = state.get_job(rid)
         if updated and updated["status"] == "completed":
-            if job and job["status"] == "validated":
+            if job and job["status"] == "completed":
                 path = state.get(f"stitched_output_path:{rid}")
                 return (
                     f"recording {rid} segment #{segment['idx']}: fetched successfully "
-                    f"-> {updated['file_path']} - that was the last segment; stitching "
-                    f"and post-stitch validation both succeeded -> {path}"
+                    f"-> {updated['file_path']} - that was the last segment; stitching, "
+                    f"validation, and the Recording-row update all succeeded -> {path} "
+                    f"(now playable in Dispatcharr)"
                 )
             if job and job["status"] == "failed":
                 return (

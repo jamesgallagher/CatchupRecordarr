@@ -39,9 +39,10 @@ SCHEMA_VERSION = "1"
 #   jobs:     pending / in_progress / stitched / validated / completed / failed
 #             ('stitched' added step 13 - every segment fetched and
 #             concatenated, not yet validated. 'validated' added step 14 -
-#             post-stitch ffprobe checks passed, but the Recording-row
-#             update/step 16 hasn't run yet, so it isn't 'completed' in
-#             Section 7's sense. Both non-terminal, same as pending/in_progress)
+#             post-stitch ffprobe checks passed. Both non-terminal. 'completed'
+#             got its first real meaning at step 16 - the native Recording
+#             row has been updated in place and is now playable in
+#             Dispatcharr; terminal, same as 'failed'.)
 #   segments: pending / in_progress / completed  (failure -> back to
 #             pending, Section 9 - deliberately no dead-end state)
 # account_dialects holds Section 8's per-M3UAccount timeshift dialect.

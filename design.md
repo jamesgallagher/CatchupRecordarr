@@ -70,7 +70,7 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.21.0**, pushed and tag-verified reachable.
+- Current version: **v0.22.0**, pushed and tag-verified reachable.
 - **`tick.py`'s `GRACE_PERIOD` is temporarily 5 minutes, not the real
   15-minute default** — a deliberate, flagged debug-speed change
   (Session 40), not a design decision. Revert to `timedelta(minutes=15)`
@@ -664,7 +664,7 @@ logic wired to it yet, per the build plan.
 
 ---
 
-## Section 7 — Recording Integration (Native Playback + Comskip) `[~] DECIDED`
+## Section 7 — Recording Integration (Native Playback + Comskip) `[x] BUILT (Recording-row update, step 16; comskip gating is step 17, not yet built)`
 
 **Updated, Session 6:** the plugin no longer *creates* a new `Recording`
 row — per Section 4/5's revised design, a native `Recording` row already
@@ -682,6 +682,22 @@ file_url / output_file_url: "/api/channels/recordings/{id}/file/"
 ended_at, bytes_written, remux_success
 program: { title, sub_title, description, ... }   # already present on the row from creation, Section 5
 ```
+
+**Built, Session 43 (step 16, v0.22.0):** `recording.py`'s
+`mark_recording_completed()` — merges (not overwrites) `custom_properties`
+exactly per the shape above, applies the `"[Catchup] "` title prefix
+(Session 11), and — a genuine gap found while building this, not just a
+refinement — actually implements Section 5's designed-but-never-coded
+fallback for a `program` dict missing a title (Session 10, #2):
+`f"{channel_name} — {start_time:%Y-%m-%d %H:%M}"` + `"Catchup recording"`.
+Every prior read of `program.get("title")` in the codebase was only ever
+a `"?"` log placeholder, so this fallback had never actually needed to
+write real, user-visible data until now. Wired into `tick.py`'s
+`_stitch_job()` immediately after validation (step 14) passes — matching
+the critical ordering rule below exactly, since this is the only call
+site. Our own internal job status finally reaches a genuinely terminal
+`'completed'` here (reserved in the schema since step 3, unused until
+now).
 
 **Comskip gating (updated for Section 4's new `comskip_enabled_default`
 setting):** verified native Dispatcharr's own trigger logic first
@@ -1619,9 +1635,10 @@ each step names the design section(s) it implements.
     retention; permanent failure marking with reason (see Section 10).
 
 **Phase H — Recording integration (Section 7)**
-16. Update the taken-over `Recording` row in place on success:
-    `custom_properties` shape, `"[Catchup] "` title prefix, merge (not
-    overwrite) to preserve existing markers (#14).
+16. **Built, Session 43 (v0.22.0):** Update the taken-over `Recording`
+    row in place on success: `custom_properties` shape, `"[Catchup] "`
+    title prefix, merge (not overwrite) to preserve existing markers
+    (#14). See Section 7.
 17. Comskip gating: global `CoreSettings` switch AND plugin's
     `comskip_enabled_default` setting.
 
@@ -2728,13 +2745,29 @@ diverges from the sections above.)*
   has since aged past retention - a real edge case worth defending
   against even though unlikely in practice (retention is typically many
   days; the segment-retry window is at most ~75 minutes). Bumped to
-  v0.21.0, pushed, tag-verified reachable.
-  **Next:** user updates to v0.21.0. Once steps 11/12 are confirmed
+  v0.21.0, pushed, tag-verified reachable. Continued to step 16: new
+  `recording.py` module, `mark_recording_completed()` — merges (never
+  overwrites) `custom_properties` into the shape Section 7 specifies,
+  applies the `"[Catchup] "` title prefix (Session 11). **A genuine gap
+  found and fixed while building this, not just a refinement:**
+  Section 5's designed fallback for a `program` dict with no title at
+  all (Session 10, #2 - `f"{channel_name} — {start_time:...}"` +
+  `"Catchup recording"`) had never actually been coded anywhere - every
+  prior read of `program.get("title")` in the codebase was only ever a
+  `"?"` log placeholder, so nothing had needed to write real, end-user-
+  visible data from it until this step. Implemented it here, the first
+  place it actually matters. Wired into `tick.py`'s `_stitch_job()`
+  immediately after validation (step 14) passes, matching Section 7's
+  critical ordering rule exactly (this is the only call site). Our own
+  internal job status finally reaches a genuinely terminal `'completed'`
+  - reserved in the schema since step 3, unused until now. Bumped to
+  v0.22.0, pushed, tag-verified reachable. Not yet verified against a
+  real recording (same blocker as steps 13-15).
+  **Next:** user updates to v0.22.0. Once steps 11/12 are confirmed
   working against a real available archive window (Sessions 37-42's open
-  question), watch a job actually flow all the way through
-  `stitched -> validated` and produce a real, verified `.mkv` file.
-  Otherwise continuing to step 16 (update the taken-over `Recording` row
-  on success, Section 7 - the first step that makes a finished catchup
-  recording actually show up as playable in Dispatcharr) regardless, per
-  the same instruction to keep building through what doesn't depend on
-  that answer.
+  question), watch a job flow all the way through
+  `stitched -> validated -> completed` and actually appear as a playable,
+  `"[Catchup] "`-tagged recording in Dispatcharr's own UI - the first
+  true end-to-end milestone. Otherwise continuing to step 17 (comskip
+  gating) regardless, per the same instruction to keep building through
+  what doesn't depend on that answer.
