@@ -48,7 +48,7 @@ may describe intent that shifts slightly once real code is written.
 
 ---
 
-## Current Status Snapshot (updated 2026-07-07, end of Session 40)
+## Current Status Snapshot (updated 2026-07-07, end of Session 41)
 
 **For picking this up on a different machine.** The Session Log below has
 the full history; this block is just the fast-orientation version.
@@ -70,7 +70,7 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.17.3**, pushed and tag-verified reachable.
+- Current version: **v0.17.4**, pushed and tag-verified reachable.
 - **`tick.py`'s `GRACE_PERIOD` is temporarily 5 minutes, not the real
   15-minute default** — a deliberate, flagged debug-speed change
   (Session 40), not a design decision. Revert to `timedelta(minutes=15)`
@@ -106,6 +106,48 @@ around the `.get()` itself — from `fetch_test_segment` and
 waiting for the next tick. Worth folding this same reap-before-claim
 pattern into step 12's real orchestration when it's built, not just this
 one test action.
+
+**Resolved, Session 41: a leftover Celery `PeriodicTask` DB row, unrelated
+to any of the above.** Real deployment logs showed `celery.worker.consumer.consumer:
+Received unregistered task of type 'catchup_recordarr.tasks.refresh_archive_flags'`
+— on first look this looked like Session 21's original registration bug
+resurfacing, but it isn't: Session 22 (v0.5.0) removed the *code* that
+registered that Celery task (replaced with the self-contained background
+thread, Section 2/3), but never deleted the *database row* itself
+(`core.scheduling.create_or_update_periodic_task` had created a real
+`django_celery_beat.PeriodicTask` named `catchup_recordarr-archive-refresh`
+back in v0.2.0). That row survived every version since, and Celery Beat
+has kept dispatching it against an empty task registry the entire time —
+harmless (the message is discarded, no functional impact; the real
+refresh runs fine via the thread, confirmed by successful refresh log
+lines moments apart in the same session) but noisy, and would persist
+forever without an explicit delete. Fixed in v0.17.4: `plugin.py`'s new
+`_cleanup_legacy_periodic_task()` deletes that row by name if present,
+run once at module load (idempotent — a no-op once it's gone), also
+protecting any other install still carrying the same leftover from an
+old version.
+
+**Open, in progress, Sessions 40–41: does the archive genuinely need
+longer than ~20 minutes, or is something else wrong?** With `GRACE_PERIOD`
+temporarily at 5 minutes (Session 40), recording 33 (a real, confirmed
+catchup-capable channel, "Sky Sports Mix FHD") was fetched three times —
+~6, ~15, and ~20 minutes after its window closed — and got **0 bytes**
+from both dialects every time (not just under the 1MB threshold, an
+actually-empty body). This is the exact "not ready yet" signal Section 8
+anticipated (a 2xx with a tiny/empty body, no HTTP error), and both
+dialects agreeing rules out a wrong-dialect explanation — but 0 bytes
+holding at 20 minutes is longer than either the temporary 5-minute or
+the original 15-minute default assumed, and this is the same provider
+(`xapi-ie.org`/account `JVRTFz5dn6`) flagged as having intermittent
+outages in Sessions 37–38, so it's not yet possible to tell "this
+provider's archive genuinely takes this long to finalize" apart from
+"this provider is still flaky." **Not yet resolved — next step is more
+data, not a code or config change:** retry the same recording at longer
+intervals (30 min, 60 min, next day) and see when/if it actually
+succeeds. Whatever interval actually works should become the *real*
+`GRACE_PERIOD` value (replacing both the 5-minute debug value and the
+original 15-minute guess), logged here as an empirically-established
+constant rather than a borrowed default once known.
 
 **Resolved this session (Sessions 35–36): a real credential leak.**
 `requests` exceptions embed the full request URL (including Xtream
@@ -2418,3 +2460,52 @@ diverges from the sections above.)*
   step 11/12 debugging wraps up - whichever comes first. Otherwise
   unchanged: still waiting on a clean provider-up retest of step 11
   (Sessions 37-39) before building step 12.
+
+- **Session 41** (2026-07-07) - Two real findings from live testing after
+  the v0.17.3 update. First, a false-alarm investigation: a recording on
+  "NZ SKY Sport SELECT" was seen starting native live capture and briefly
+  suspected as a missed-takeover bug (the gap flagged in Session 25 but
+  never built - a catch-up sweep for recordings the `post_save` signal
+  missed) - ruled out once the user confirmed via "List Catchup Channels"
+  that channel simply isn't catchup-capable, so native capture was
+  correct, expected behavior. The actually-stuck recording from earlier
+  in the session (concluded 11:45am, never picked up) was independently
+  confirmed via "List Pending Segments" to not be a tracked job at all
+  either - most likely the same non-catchup-channel explanation, not
+  confirmed with certainty this session (channel not yet checked).
+  Second, two real bugs found and fixed from testing recording 33 (a
+  genuine catchup-capable channel, "Sky Sports Mix FHD," takeover
+  confirmed firing correctly in real time 3 minutes before air):
+  1. **Leftover Celery `PeriodicTask` row.** Logs showed `Received
+     unregistered task of type 'catchup_recordarr.tasks.refresh_archive_flags'`
+     - initially looked like Session 21's registration bug back again,
+     but traced to something different: Session 22 (v0.5.0) removed the
+     code using that Celery task but never deleted the actual DB row
+     `core.scheduling.create_or_update_periodic_task` had created back in
+     v0.2.0, so Celery Beat has been dispatching it into an empty
+     registry for ~35 versions. Harmless (discarded, no functional
+     impact - the real refresh worked fine via the thread in the same
+     log capture) but a genuine loose end. Fixed:
+     `plugin.py::_cleanup_legacy_periodic_task()`, deletes the row by
+     name if present, run once at module load, idempotent.
+  2. **Fetch result: 0 bytes from both dialects, three times (~6, ~15,
+     ~20 minutes post-air).** This is the exact "not ready yet" signal
+     Section 8 anticipated (2xx, empty body, no HTTP error) - both
+     dialects agreeing rules out a dialect-mismatch explanation - but
+     0 bytes holding at 20 minutes is longer than either grace-period
+     value assumed, and this is the same provider flagged as
+     intermittently flaky in Sessions 37-38, so "genuinely needs more
+     time" vs. "still having outage issues" can't be told apart yet.
+     Not fixed, not a code change - logged as an open item, with the
+     concrete next step being more data (retry at 30/60 min and next
+     day) rather than guessing. Whatever interval actually works should
+     become the real `GRACE_PERIOD`, replacing both the Session 40
+     debug value and the original 15-minute guess.
+  Bumped to v0.17.4, pushed, tag-verified reachable. **Next:** user
+  retries "Fetch One Pending Segment Now" against recording 33 at longer
+  intervals to establish the real archive lag; confirms whether "NZ SKY
+  Sport SELECT" and the original stuck recording's channel are both
+  simply non-catchup-capable (expected) via "List Catchup Channels"; and
+  should see clean logs going forward with no more unregistered-task
+  errors. Once a real lag value is known, update `GRACE_PERIOD`
+  permanently and move to closing out step 11.

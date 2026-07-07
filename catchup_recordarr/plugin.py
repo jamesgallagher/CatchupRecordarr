@@ -36,6 +36,38 @@ CLAIM_STALE_AFTER = timedelta(minutes=10)
 _scheduler_started = False
 _scheduler_lock = threading.Lock()
 
+# Name used by the abandoned Celery-PeriodicTask approach above (pre-v0.5.0,
+# via core.scheduling.create_or_update_periodic_task). Confirmed on a real
+# deployment (Session 41): removing the *code* in Session 22 never removed
+# the *database row* itself, so Celery Beat has kept dispatching it against
+# an empty registry ever since - "Received unregistered task ... KeyError"
+# every time it fires. Harmless (the message is just discarded, and the
+# real refresh runs fine via the background thread below), but it's a
+# genuine loose end left in the DB, not a code bug to route around.
+LEGACY_PERIODIC_TASK_NAME = "catchup_recordarr-archive-refresh"
+
+
+def _cleanup_legacy_periodic_task():
+    """One-time, idempotent: delete the leftover PeriodicTask row from the
+    pre-v0.5.0 Celery-based refresh mechanism, if still present. Safe to
+    run on every plugin load - a no-op once the row's gone. Also protects
+    any other install still carrying the same leftover from an old
+    version, not just this deployment.
+    """
+    try:
+        from django_celery_beat.models import PeriodicTask
+
+        deleted, _ = PeriodicTask.objects.filter(name=LEGACY_PERIODIC_TASK_NAME).delete()
+        if deleted:
+            logger.info(
+                "%s removed leftover Celery PeriodicTask '%s' from the "
+                "pre-v0.5.0 refresh mechanism (Session 22 replaced it with "
+                "a background thread, but never deleted the DB row itself)",
+                LOG_TAG, LEGACY_PERIODIC_TASK_NAME,
+            )
+    except Exception:
+        logger.exception("%s legacy PeriodicTask cleanup failed (non-fatal)", LOG_TAG)
+
 
 def _due_for_refresh():
     last_completed = state.get("archive_refresh_last_completed_at")
@@ -107,6 +139,7 @@ def _start_scheduler():
         logger.info("%s background scheduler thread started", LOG_TAG)
 
 
+_cleanup_legacy_periodic_task()
 _start_scheduler()
 tick.start()
 
