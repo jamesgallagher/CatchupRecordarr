@@ -95,17 +95,21 @@ the full history; this block is just the fast-orientation version.
   worth being aware of before updating: previously nothing happened
   without a manual click.
 
-**Build progress:** steps 1–12 of Section 15's build plan are built.
-Step 11 (single-segment fetch) proved the fetch mechanism end-to-end
-against the user's real provider; the open question of *why* real
-fetches keep returning 0 bytes/erroring (provider outage vs. genuine
-archive-finalization lag) is not a step 11 code defect — see the
-Sessions 37–42 entries below, still unresolved pending a clean
-TiViMate-confirmed retest. Step 12 (segment state machine, retry cap,
-orphan recovery) built and pushed this session (v0.18.0) — not yet
-verified end-to-end on the real deployment (automatic fetching wasn't
-live before this version). Steps 13–20 haven't started. Mirror this in
-the task list (`TaskCreate`/`TaskUpdate`) when resuming.
+**Build progress: steps 1–19 of Section 15's build plan are built
+(Session 43, v0.18.0 → v0.25.0).** Step 11 (single-segment fetch) proved
+the fetch mechanism end-to-end against the user's real provider; the
+open question of *why* real fetches keep returning 0 bytes/erroring
+(provider outage vs. genuine archive-finalization lag) is not a step 11
+code defect — see the Sessions 37–42 entries below, still unresolved
+pending a clean TiViMate-confirmed retest. **None of steps 12–19 have
+been verified end-to-end against a real recording yet** — they were all
+built and pushed in one continuous session at the user's explicit
+request to keep going regardless of the still-open provider question,
+since none of that work actually depends on the answer. Step 20 (the
+real end-to-end test) is the only remaining build-plan item, and it
+genuinely can't be done without the user's live deployment — see its
+checklist in Section 15. Mirror this in the task list
+(`TaskCreate`/`TaskUpdate`) when resuming.
 
 **Resolved, Session 39: a stale-job crash, distinct from the outage
 investigation below.** Retesting "Fetch One Pending Segment Now" hit
@@ -1728,7 +1732,42 @@ each step names the design section(s) it implements.
 **Phase J — Real-world validation**
 20. End-to-end test against a real provider account — this is where
     Section 9's parked stitch-boundary risk (Section 13) actually gets
-    tested for the first time.
+    tested for the first time. **Needs the user's real deployment - not
+    something buildable in advance.** Checklist prepared Session 43,
+    v0.25.0:
+    1. Update to v0.25.0, confirm a clean load (`[Catchup v0.25.0]` in
+       logs, "Ping" action returns OK with "state store OK").
+    2. Check Settings → Plugins → Catchup Recordarr shows the three new
+       fields (`comskip_enabled_default`, `grace_period_minutes`,
+       `segment_retry_backoff_minutes`) and that changing one takes
+       effect on the next tick without a restart.
+    3. Once TiViMate (or repeated retries) confirms a catchup window is
+       actually available for a real, catchup-capable recording: either
+       wait for the automatic tick or run "Fetch One Pending Segment
+       Now" / "Run Status Tick Now" to speed it along.
+    4. Watch the logs for the full chain firing in order: segment
+       fetch(es) succeed → `_stitch_job()` → stitched → post-stitch
+       `ffprobe` validation passes → Recording row updated to completed
+       → (if enabled) comskip queued.
+    5. Use "List Pending Segments" while it's still non-terminal to
+       watch `pending → in_progress → completed` per segment, then the
+       job's own `stitched → validated` progression; it should disappear
+       from that list once genuinely `completed` (by design - check
+       Dispatcharr's own Recordings UI at that point instead).
+    6. In Dispatcharr's own Recordings UI: confirm the recording shows
+       up completed, titled `"[Catchup] <original title>"`, and
+       **actually plays back** - this is the first real test of
+       Section 9's parked stitch-boundary risk (do segment seams glitch
+       or desync audio/video at the ~15-minute cut points?). No amount
+       of design discussion can resolve that; only this test can.
+    7. If retention-expiry (step 15) or a validation failure (step 14)
+       is easy to trigger/observe, confirm the job is marked `'failed'`
+       with a clear, specific reason via "List Pending Segments".
+    8. Report back: recording id(s) tested, what worked, what didn't,
+       and (especially) whether playback was clean across segment
+       boundaries - that single data point is the one thing this whole
+       build has been unable to verify without a real recording to test
+       against.
 
 **Natural milestone checkpoints** (good "if I had to stop for a while,
 stop here" points): after step 1 (plugin loads), after step 6 (takeover +
