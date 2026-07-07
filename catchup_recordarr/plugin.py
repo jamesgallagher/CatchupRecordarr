@@ -300,8 +300,10 @@ class Plugin:
                     for s in segments
                 )
                 extra = ""
-                if job_status == "stitched":
-                    extra = f" -> stitched to {state.get(f'stitched_output_path:{rid}')}"
+                if job_status in ("stitched", "validated"):
+                    extra = f" -> {state.get(f'stitched_output_path:{rid}')}"
+                    if job_status == "validated":
+                        extra += " (post-stitch validation passed)"
                 lines.append(f"recording {rid} [{job_status}] ({len(segments)} segment(s)): {seg_summary}{extra}")
 
             # Terminal failures don't show up above once

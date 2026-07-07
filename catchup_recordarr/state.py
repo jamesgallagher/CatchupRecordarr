@@ -36,11 +36,12 @@ SCHEMA_VERSION = "1"
 # Full Section 6 schema. Job identity is the native Recording.id (the
 # plugin acts on existing native rows, it never invents its own job ids).
 # Statuses are plain strings matching the design's state machines:
-#   jobs:     pending / in_progress / stitched / completed / failed
+#   jobs:     pending / in_progress / stitched / validated / completed / failed
 #             ('stitched' added step 13 - every segment fetched and
-#             concatenated, but validation/step 14 and the Recording-row
-#             update/step 16 haven't run yet, so it isn't 'completed' in
-#             Section 7's sense; non-terminal, same as pending/in_progress)
+#             concatenated, not yet validated. 'validated' added step 14 -
+#             post-stitch ffprobe checks passed, but the Recording-row
+#             update/step 16 hasn't run yet, so it isn't 'completed' in
+#             Section 7's sense. Both non-terminal, same as pending/in_progress)
 #   segments: pending / in_progress / completed  (failure -> back to
 #             pending, Section 9 - deliberately no dead-end state)
 # account_dialects holds Section 8's per-M3UAccount timeshift dialect.

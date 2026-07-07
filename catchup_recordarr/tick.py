@@ -38,6 +38,7 @@ from .download import fetch_segment
 from .planning import SEGMENT_MINUTES, plan_segments
 from .provider import resolve_provider_timezone
 from .stitch import stitch_segments
+from .validate import validate_output
 
 logger = logging.getLogger(__name__)
 
@@ -346,28 +347,51 @@ def _stitch_job(rid):
         LOG_TAG, rid, len(segment_paths), output_path,
     )
     success, error = stitch_segments(segment_paths, output_path)
-    if success:
-        state.set(f"stitched_output_path:{rid}", output_path)
-        # 'stitched' - an intermediate non-terminal status beyond the
-        # pending/in_progress/completed/failed set state.py originally
-        # documented (Section 6): all segments are down and concatenated,
-        # but validation (step 14) and the Recording-row update (step 16)
-        # haven't run yet, so this isn't 'completed' in Section 7's sense.
-        # Still excluded from nothing - non_terminal_job_recording_ids()
-        # keeps returning it (correctly - there's still work to do), but
-        # _process_segments() finds no pending segment to claim for it,
-        # so it just sits harmlessly until step 14 picks it up.
-        state.set_job_status(rid, "stitched")
-        logger.info(
-            "%s recording %s: stitched successfully -> %s (%d bytes)",
-            LOG_TAG, rid, output_path, os.path.getsize(output_path),
-        )
-    else:
+    if not success:
         state.set_job_status(rid, "failed", f"stitching failed: {error}")
         logger.error(
             "%s recording %s: stitching failed - %s - job marked "
             "permanently failed",
             LOG_TAG, rid, error,
+        )
+        return
+
+    state.set(f"stitched_output_path:{rid}", output_path)
+    logger.info(
+        "%s recording %s: stitched successfully -> %s (%d bytes)",
+        LOG_TAG, rid, output_path, os.path.getsize(output_path),
+    )
+
+    # Step 14 - validate before this is ever allowed to look finished
+    # (Section 7's ordering rule: never mark something completed until
+    # it's fully downloaded, stitched, AND verified).
+    rec = Recording.objects.filter(id=rid).only("start_time", "end_time").first()
+    if rec is None:
+        # _reap_orphaned_jobs() normally catches a deleted Recording
+        # before we ever get this far, but handle the gap defensively
+        # rather than crash on rec.end_time below.
+        state.delete_job(rid)
+        return
+
+    valid, verror = validate_output(output_path, rec.end_time - rec.start_time)
+    if valid:
+        # 'validated' - still not Section 7's 'completed' (that's the
+        # native Recording row's own status field, set by step 16 once
+        # it actually updates that row) - this is our own internal
+        # state's last non-terminal stop before step 16 exists.
+        state.set_job_status(rid, "validated")
+        logger.info("%s recording %s: post-stitch validation passed", LOG_TAG, rid)
+    else:
+        # Step 15 will turn a validation failure into a proper job-level
+        # retry policy tied to archive retention; until it exists, an
+        # immediate permanent failure with a clear reason is the correct
+        # v1 behavior - same as step 12's segment-retry-cap exhaustion -
+        # rather than silently leaving a bad file marked 'stitched'.
+        state.set_job_status(rid, "failed", f"post-stitch validation failed: {verror}")
+        logger.error(
+            "%s recording %s: post-stitch validation failed - %s - job "
+            "marked permanently failed",
+            LOG_TAG, rid, verror,
         )
 
 
@@ -407,17 +431,18 @@ def fetch_one_segment_now():
         )
         job = state.get_job(rid)
         if updated and updated["status"] == "completed":
-            if job and job["status"] == "stitched":
+            if job and job["status"] == "validated":
                 path = state.get(f"stitched_output_path:{rid}")
                 return (
                     f"recording {rid} segment #{segment['idx']}: fetched successfully "
-                    f"-> {updated['file_path']} - that was the last segment, and "
-                    f"stitching succeeded -> {path}"
+                    f"-> {updated['file_path']} - that was the last segment; stitching "
+                    f"and post-stitch validation both succeeded -> {path}"
                 )
             if job and job["status"] == "failed":
                 return (
                     f"recording {rid} segment #{segment['idx']}: fetched successfully, "
-                    f"but that was the last segment and stitching failed - {job['last_error']}"
+                    f"but that was the last segment and stitching or validation "
+                    f"failed - {job['last_error']}"
                 )
             return f"recording {rid} segment #{segment['idx']}: fetched successfully -> {updated['file_path']}"
         if job and job["status"] == "failed":

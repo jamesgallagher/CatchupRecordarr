@@ -70,7 +70,7 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.19.0**, pushed and tag-verified reachable.
+- Current version: **v0.20.0**, pushed and tag-verified reachable.
 - **`tick.py`'s `GRACE_PERIOD` is temporarily 5 minutes, not the real
   15-minute default** — a deliberate, flagged debug-speed change
   (Session 40), not a design decision. Revert to `timedelta(minutes=15)`
@@ -1170,6 +1170,21 @@ existing retry-cap machinery (Sections 9/10) — log both expected and
 actual values for diagnosability, retry since they may be transient.
 Failure of check 1 is systemic — flag the account/source, not one job.
 
+**Built, Session 43 (step 14, v0.20.0):** `validate.py`'s
+`validate_output()` — checks 2 and 3 exactly as specified above,
+`ffprobe -show_format -show_streams` parsed as JSON. Wired into
+`tick.py`'s `_stitch_job()` immediately after a successful stitch: a
+passing job moves to a new `'validated'` status (still not Section 7's
+`'completed'` — that's the native `Recording` row's own status field,
+set by step 16, not built yet). **Deliberate scope note, not yet
+matching "retry since they may be transient" above:** step 15 (job-level
+retry cap tied to archive retention) is what's meant to turn a
+validation failure into an actual retry policy — it doesn't exist yet,
+so for now a failed check 2/3 marks the job immediately and permanently
+`'failed'` with a clear reason, the same v1 behavior step 12 already
+uses for segment-retry-cap exhaustion, rather than silently leaving a
+bad file marked `'stitched'`. Revisit once step 15 exists.
+
 ---
 
 ## Section 11 — Output Format `[x] BUILT`
@@ -1587,7 +1602,8 @@ each step names the design section(s) it implements.
     Section 11).
 
 **Phase G — Validation (Section 10)**
-14. Post-stitch `ffprobe` duration + playability checks.
+14. **Built, Session 43 (v0.20.0):** Post-stitch `ffprobe` duration +
+    playability checks (`validate.py`, see Section 10).
 15. Job-level retry cap tied to archive retention; permanent failure
     marking with reason.
 
@@ -2670,13 +2686,27 @@ diverges from the sections above.)*
   and concatenated, but validation/step 14 and the Recording-row
   update/step 16 haven't run yet) - deliberately not `'completed'` yet,
   matching Section 7's ordering rule against marking something finished
-  before it's actually verified. Bumped to v0.19.0, pushed, tag-verified
-  reachable. Not yet verified against a real multi-segment recording -
-  blocked on the same open provider question as steps 11/12.
-  **Next:** user updates to v0.19.0; once step 11/12 are confirmed
-  working against a real available archive window (Sessions 37-42's
-  open question), watch a job actually reach `'stitched'` and produce a
-  real `.mkv` file. Otherwise continuing to step 14 (post-stitch
-  `ffprobe` duration + playability validation) regardless, per the same
-  instruction to keep building through what doesn't depend on that
-  answer.
+  before it's actually verified. Bumped to v0.19.0. Not yet verified
+  against a real multi-segment recording - blocked on the same open
+  provider question as steps 11/12. Continued straight on to step 14:
+  new `validate.py` module (`validate_output()`) runs the two post-stitch
+  `ffprobe` checks Section 10 already specified (duration within ±5%/±2min
+  of `end_time - start_time`, at least one valid video stream), wired
+  into `_stitch_job()` immediately after a successful stitch. A passing
+  job moves to a new `'validated'` status - deliberately still not
+  Section 7's `'completed'`, since that's the native `Recording` row's
+  own status field, only set once step 16 exists. **Scope note written
+  into Section 10:** a failing check is supposed to eventually become a
+  proper retry policy (step 15, not built yet) rather than an immediate
+  permanent failure - until step 15 exists, a failed check 2/3 marks the
+  job immediately `'failed'` with a clear reason, matching step 12's
+  existing segment-retry-cap-exhaustion behavior; revisit once step 15
+  lands. Bumped to v0.20.0, pushed, tag-verified reachable. Not yet
+  verified against a real recording either, same blocker as step 13.
+  **Next:** user updates to v0.20.0. Once steps 11/12 are confirmed
+  working against a real available archive window (Sessions 37-42's open
+  question), watch a job actually flow all the way through
+  `stitched -> validated` and produce a real, verified `.mkv` file.
+  Otherwise continuing to step 15 (job-level retry cap tied to archive
+  retention) regardless, per the same instruction to keep building
+  through what doesn't depend on that answer.
