@@ -427,8 +427,14 @@ def _stitch_job(rid):
     # fully downloaded, stitched, AND verified (Section 7's ordering
     # rule). Moves our own internal job status to a genuinely terminal
     # 'completed' - the first real use of that status value since it was
-    # reserved in the schema back in step 3.
-    mark_recording_completed(rec, output_path)
+    # reserved in the schema back in step 3. Left at 'validated' (not
+    # advanced, not failed) if the save itself fails - the underlying
+    # work all genuinely succeeded, only the DB write didn't, so there's
+    # no reason to burn the job's segment-retry machinery over it; it
+    # stays visible as a non-terminal 'validated' job (e.g. via "List
+    # Pending Segments") rather than silently lost either way.
+    if not mark_recording_completed(rec, output_path):
+        return
     state.set_job_status(rid, "completed")
 
     # Step 17 - same gate native live capture uses (global CoreSettings
@@ -447,8 +453,9 @@ def _process_segments():
     one process can ever be mid-fetch for a given segment (or, via the
     NOT EXISTS check inside that claim, a given job) at a time.
     """
+    backoff = _segment_retry_backoff()  # one setting read per tick, not per job
     for rid in state.non_terminal_job_recording_ids():
-        segment = state.claim_next_pending_segment(rid, _segment_retry_backoff())
+        segment = state.claim_next_pending_segment(rid, backoff)
         if segment is not None:
             _fetch_claimed_segment(rid, segment)
 
@@ -463,8 +470,9 @@ def fetch_one_segment_now():
     human-readable status string for the action's response.
     """
     _reap_orphaned_jobs()
+    backoff = _segment_retry_backoff()  # one setting read, not per job
     for rid in state.non_terminal_job_recording_ids():
-        segment = state.claim_next_pending_segment(rid, _segment_retry_backoff())
+        segment = state.claim_next_pending_segment(rid, backoff)
         if segment is None:
             continue
         _fetch_claimed_segment(rid, segment)

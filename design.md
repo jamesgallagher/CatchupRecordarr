@@ -70,7 +70,7 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.24.0**, pushed and tag-verified reachable.
+- Current version: **v0.25.0**, pushed and tag-verified reachable.
 - **Resolved, Session 43 (step 18): both are now real, independent
   settings, not hardcoded constants.** `grace_period_minutes` and
   `segment_retry_backoff_minutes` are configurable `Plugin.fields`
@@ -1454,7 +1454,7 @@ re-litigated from scratch later:
 
 ---
 
-## Section 14 — Logging & Observability Philosophy `[~] DECIDED`
+## Section 14 — Logging & Observability Philosophy `[x] BUILT (audited through step 19)`
 
 **Why this gets its own section:** this plugin is a headless, poll-driven
 background system (Section 5) — there's no request/response cycle a user
@@ -1599,6 +1599,39 @@ claim/retry detail at DEBUG, independent of Dispatcharr's global log
 level — worth adding only if v1 turns out to need finer-grained tracing
 than the above provides; not designing this preemptively.
 
+**Logging audit pass (step 19, Session 43, v0.25.0):** re-grepped every
+module for exception handlers and log lines added since the last audit
+(Session 35/38), per this section's own standing rule. Found and fixed
+one real gap, not just a style nit: `recording.py`'s
+`mark_recording_completed()` (`rec.save()`) and `maybe_queue_comskip()`
+(`comskip_process_recording.delay()`) were the only two functions built
+this session that didn't follow this codebase's established "return a
+result, never raise" convention for mechanic functions
+(`download.fetch_segment()`, `stitch.stitch_segments()`,
+`validate.validate_output()` all do). An exception from either would
+have propagated up into `tick.py`'s tick-level catch-all
+(`"status-transition tick error"`) — technically logged, but exactly the
+"no identifying context" failure mode this section warns against, since
+that generic line doesn't carry which recording was involved. Both now
+catch their own exception, log it with the recording's id attached, and
+return a result the caller checks (`tick.py`'s `_stitch_job()` now leaves
+a job at `'validated'` rather than advancing to `'completed'` if the
+Recording-row save itself fails, rather than losing that distinction).
+Also fixed a real inefficiency while in there: `_process_segments()`/
+`fetch_one_segment_now()` were calling `_segment_retry_backoff()` (a
+`PluginConfig` DB read) once per non-terminal job inside their loops,
+not once per tick - moved outside the loop. Everything else audited
+clean: every provider-facing exception handler still routes through
+`safe_error_string()`; no hardcoded log-tag strings bypass the shared
+`LOG_TAG`; every module correctly imports it; the new local-only modules
+(`stitch.py`, `validate.py`) correctly have no credential exposure risk
+(no network calls) and correctly follow the established pattern of
+returning results for the caller to log, rather than logging internally
+themselves (matching `download.py`/`planning.py`/`timeshift.py`'s
+existing pattern - only `dialect.py` logs inline, because a dialect
+swap is itself a decision worth logging at its own point of occurrence,
+not just a mechanical success/failure).
+
 ---
 
 ## Section 15 — Build Plan (Iterative Steps) `[ ] NOT STARTED`
@@ -1687,9 +1720,10 @@ each step names the design section(s) it implements.
     candidate) turned out to already be superseded by step 15's
     retention-based failure marking, which achieves the same goal a
     different way - not built as a separate setting, see Section 5.
-19. Logging audit pass: confirm every step above actually followed
-    Section 14's conventions (tags, structured context, no credentials
-    logged) rather than assuming it did while focused on functionality.
+19. **Built, Session 43 (v0.25.0):** Logging audit pass - found and
+    fixed one real gap (two functions in `recording.py` not following
+    the established "return a result, never raise" convention) plus a
+    settings-read inefficiency. See Section 14.
 
 **Phase J — Real-world validation**
 20. End-to-end test against a real provider account — this is where
@@ -2841,13 +2875,32 @@ diverges from the sections above.)*
   so a change takes effect without a restart). Centralized `PLUGIN_KEY`
   into `_version.py` while touching this (previously duplicated in
   `takeover.py`). Bumped to v0.24.0, pushed, tag-verified reachable.
-  **Next:** user updates to v0.24.0 and can now tune the grace period /
-  retry backoff directly in Settings → Plugins instead of needing a code
-  change. Once steps 11/12 are confirmed working against a real
-  available archive window (Sessions 37-42's open question), watch a
-  job flow all the way through `stitched -> validated -> completed` and
-  actually appear as a playable, `"[Catchup] "`-tagged recording in
-  Dispatcharr's own UI - the first true end-to-end milestone. Otherwise
-  continuing to step 19 (logging audit pass) regardless, per the same
-  instruction to keep building through what doesn't depend on that
-  answer.
+  User can now tune the grace period / retry backoff directly in
+  Settings → Plugins instead of needing a code change. Continued to
+  step 19: re-grepped every module for exception handlers and log lines
+  added since the last audit (Session 35/38). Found one real gap:
+  `recording.py`'s `mark_recording_completed()` and `maybe_queue_comskip()`
+  were the only two functions built this session that didn't follow the
+  established "return a result, never raise" convention every other
+  mechanic function in this codebase uses - an exception from either
+  would have propagated into `tick.py`'s generic tick-level catch-all,
+  losing the specific recording's identity, exactly the failure mode
+  Section 14 warns against. Both now catch their own exception, log it
+  with the recording id attached, and return a result the caller checks
+  (`_stitch_job()` now leaves a job at `'validated'` rather than
+  advancing to `'completed'` if the Recording-row save itself fails).
+  Also fixed a real inefficiency: `_process_segments()`/
+  `fetch_one_segment_now()` were reading the `segment_retry_backoff_minutes`
+  setting (a DB query) once per job inside their loops rather than once
+  per tick. Everything else audited clean. Bumped to v0.25.0, pushed,
+  tag-verified reachable.
+  **Next:** user updates to v0.25.0. Once steps 11/12 are confirmed
+  working against a real available archive window (Sessions 37-42's
+  open question), watch a job flow all the way through
+  `stitched -> validated -> completed` and actually appear as a
+  playable, `"[Catchup] "`-tagged recording in Dispatcharr's own UI -
+  the first true end-to-end milestone. Otherwise continuing to step 20
+  (preparing the real-world E2E validation checklist) regardless, per
+  the same instruction to keep building through what doesn't depend on
+  that answer - step 20 itself can't be *completed* without the user's
+  own real deployment, but the checklist/manual-action groundwork can.

@@ -42,6 +42,15 @@ def mark_recording_completed(rec, output_path):
     overwriting it wholesale - Session 8 (#14) found RecurringRecordingRule
     recordings carry a 'rule' marker the frontend reads for its own
     "Recurring" badge, which a naive overwrite would silently strip.
+
+    Returns True on success, False if the save itself failed - logged
+    with the recording's identity here rather than left to raise up into
+    tick.py's tick-level try/except, whose generic "status-transition
+    tick error" catch-all (Section 14) would otherwise be the only trace
+    of a failure that's actually specific to one recording. Matches
+    every other provider/mechanic function in this codebase
+    (download.fetch_segment(), stitch.stitch_segments(),
+    validate.validate_output()) - return a result, never raise.
     """
     cp = dict(rec.custom_properties or {})
 
@@ -74,11 +83,27 @@ def mark_recording_completed(rec, output_path):
     cp.pop("interrupted_reason", None)  # no longer meaningful once completed
 
     rec.custom_properties = cp
-    rec.save(update_fields=["custom_properties"])
+    try:
+        rec.save(update_fields=["custom_properties"])
+    except Exception:
+        # Local DB write, not a provider-facing call - safe to log the
+        # full exception directly (Section 14's safe_error_string() rule
+        # is specifically about calls that can embed provider
+        # credentials in their own str(), which this isn't).
+        logger.exception(
+            "%s recording %s: failed to save the Recording row as "
+            "completed - the file itself is fully downloaded, stitched, "
+            "and validated, but Dispatcharr won't show it as finished "
+            "until this save succeeds",
+            LOG_TAG, rec.id,
+        )
+        return False
+
     logger.info(
         "%s recording %s: Recording row updated to completed - %s (%d bytes)",
         LOG_TAG, rec.id, output_path, cp["bytes_written"],
     )
+    return True
 
 
 def maybe_queue_comskip(rec):
@@ -106,5 +131,18 @@ def maybe_queue_comskip(rec):
     if not get_bool_setting("comskip_enabled_default", False):
         return
 
-    comskip_process_recording.delay(rec.id)
+    try:
+        comskip_process_recording.delay(rec.id)
+    except Exception:
+        # Non-fatal either way: the recording itself is already marked
+        # completed and playable (mark_recording_completed() already
+        # succeeded by the time this is called) - comskip is a nice-to-
+        # have on top, not a precondition for the recording being usable.
+        logger.exception(
+            "%s recording %s: failed to queue comskip processing (non-fatal "
+            "- the recording is still marked completed and playable)",
+            LOG_TAG, rec.id,
+        )
+        return
+
     logger.info("%s recording %s: queued for comskip processing", LOG_TAG, rec.id)
