@@ -96,11 +96,15 @@
             {
                 "version": "0.20.0",
                 "url": "https://github.com/jamesgallagher/CatchupRecordarr/archive/refs/tags/v0.20.0.zip"
+            },
+            {
+                "version": "0.21.0",
+                "url": "https://github.com/jamesgallagher/CatchupRecordarr/archive/refs/tags/v0.21.0.zip"
             }
         ],
         "latest": {
-            "version": "0.20.0",
-            "url": "https://github.com/jamesgallagher/CatchupRecordarr/archive/refs/tags/v0.20.0.zip"
+            "version": "0.21.0",
+            "url": "https://github.com/jamesgallagher/CatchupRecordarr/archive/refs/tags/v0.21.0.zip"
         }
     }
 }

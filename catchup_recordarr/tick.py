@@ -155,20 +155,38 @@ def _check_post_air_ready():
     ).select_related("channel")
 
     for rec in candidates:
+        job = state.get_job(rec.id)
+        if job and job["status"] in ("stitched", "validated"):
+            # Already has a real deliverable file waiting on step 16 -
+            # never retroactively fail it as "too old" just because its
+            # (already-fetched) window has since aged past retention.
+            # Only relevant for jobs still working toward that point.
+            continue
+
         retention_days = (
             channel_archive_retention_days(rec.channel) if rec.channel else 0
         )
         if retention_days and rec.end_time < now - timedelta(days=retention_days):
-            # Job-level retention cutoff/permanent-failure handling is
-            # step 15 - not built yet. Log once, don't spam every tick.
-            if not state.get(f"post_air_retention_warned:{rec.id}"):
-                logger.warning(
-                    "%s recording %s: window has aged out of the provider's "
-                    "%sd archive retention before being fetched - job-level "
-                    "retention cutoff/failure handling not built yet (step 15)",
-                    LOG_TAG, rec.id, retention_days,
-                )
-                state.set(f"post_air_retention_warned:{rec.id}", "1")
+            # Step 15 - Section 10's job-level cap IS this retention
+            # cutoff, not a separate counter: "once the requested window
+            # falls out of the channel's archive retention, stop
+            # retrying and mark the job permanently failed." Marking
+            # 'failed' here (rather than just warning, as before step 15)
+            # removes the job from non_terminal_job_recording_ids() on
+            # the very next query, so this naturally stops it being
+            # re-checked - no separate dedup flag needed the way the old
+            # warn-only version required, since a terminal job just never
+            # matches this query again.
+            reason = (
+                f"window aged out of the provider's {retention_days}d archive "
+                f"retention before catchup fetch completed (window closed "
+                f"{now - rec.end_time} ago)"
+            )
+            state.set_job_status(rec.id, "failed", reason)
+            logger.error(
+                "%s recording %s: %s - job marked permanently failed",
+                LOG_TAG, rec.id, reason,
+            )
             continue
 
         # Plan segments (step 10) the first time a job is seen as ready -

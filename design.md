@@ -70,7 +70,7 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.20.0**, pushed and tag-verified reachable.
+- Current version: **v0.21.0**, pushed and tag-verified reachable.
 - **`tick.py`'s `GRACE_PERIOD` is temporarily 5 minutes, not the real
   15-minute default** — a deliberate, flagged debug-speed change
   (Session 40), not a design decision. Revert to `timedelta(minutes=15)`
@@ -1094,7 +1094,7 @@ orphan case above — worth folding the same reap-before-claim step into
 step 12's real claim→fetch→mark orchestration, not just leaving it in
 the one test action that happened to hit it first.
 
-## Section 10 — Failure, Retry & Crash Recovery (Job-Level) `[~] DECIDED (design only)`
+## Section 10 — Failure, Retry & Crash Recovery (Job-Level) `[x] BUILT (steps 14-15; fallback-channel rotation out of scope)`
 
 Native live-recording precedent studied for reference (not reused code,
 since the plugin can't hook into core's Redis-lock recovery flow — this is
@@ -1120,7 +1120,18 @@ a plugin-owned reimplementation of the same *ideas*):
   has no notion of "this program is the same broadcast on another
   channel"). Building one would mean re-inventing plugin-owned
   curation — exactly what Session 6 removed. See Section 13 for the
-  future-consideration note.
+  future-consideration note. **Built, Session 43 (step 15, v0.21.0):**
+  turned out this retention cutoff *is* the whole "job-level retry cap"
+  — not a separate counter alongside the per-segment one (Section 9). A
+  version of this check already existed since step 6 (`_check_post_air_ready()`)
+  but only warned once and left the job retrying forever; now it calls
+  `state.set_job_status(rid, "failed", reason)`, which removes the job
+  from `non_terminal_job_recording_ids()` on the next query and so
+  naturally stops it being re-checked — no separate dedup flag needed
+  the way the warn-only version required. Guarded so it never
+  retroactively fails a job that already reached `'stitched'`/`'validated'`
+  (steps 13/14) just because its already-fetched window has since aged
+  past retention.
 - Failure surfaced by setting `custom_properties["status"] = "failed"`
   with a reason string on the taken-over `Recording` row (Section 4/5/7,
   revised Session 6 — no longer a row the plugin created itself) —
@@ -1604,8 +1615,8 @@ each step names the design section(s) it implements.
 **Phase G — Validation (Section 10)**
 14. **Built, Session 43 (v0.20.0):** Post-stitch `ffprobe` duration +
     playability checks (`validate.py`, see Section 10).
-15. Job-level retry cap tied to archive retention; permanent failure
-    marking with reason.
+15. **Built, Session 43 (v0.21.0):** Job-level retry cap tied to archive
+    retention; permanent failure marking with reason (see Section 10).
 
 **Phase H — Recording integration (Section 7)**
 16. Update the taken-over `Recording` row in place on success:
@@ -2703,10 +2714,27 @@ diverges from the sections above.)*
   existing segment-retry-cap-exhaustion behavior; revisit once step 15
   lands. Bumped to v0.20.0, pushed, tag-verified reachable. Not yet
   verified against a real recording either, same blocker as step 13.
-  **Next:** user updates to v0.20.0. Once steps 11/12 are confirmed
+  Continued to step 15: turned out Section 10's "job-level retry cap
+  tied to archive retention" is the *same* mechanism as a retention-
+  expiry check that had already existed since step 6 (`_check_post_air_ready()`)
+  — it just only ever warned once and left the job retrying forever
+  rather than actually stopping it. Changed it to call
+  `state.set_job_status(rid, "failed", reason)`, which removes the job
+  from `non_terminal_job_recording_ids()` on the next query and
+  naturally stops it being re-checked - simpler than the old warn-once
+  dedup-flag approach, not just functionally different. Added a guard so
+  a job that already reached `'stitched'`/`'validated'` (steps 13/14) is
+  never retroactively failed just because its already-fetched window
+  has since aged past retention - a real edge case worth defending
+  against even though unlikely in practice (retention is typically many
+  days; the segment-retry window is at most ~75 minutes). Bumped to
+  v0.21.0, pushed, tag-verified reachable.
+  **Next:** user updates to v0.21.0. Once steps 11/12 are confirmed
   working against a real available archive window (Sessions 37-42's open
   question), watch a job actually flow all the way through
   `stitched -> validated` and produce a real, verified `.mkv` file.
-  Otherwise continuing to step 15 (job-level retry cap tied to archive
-  retention) regardless, per the same instruction to keep building
-  through what doesn't depend on that answer.
+  Otherwise continuing to step 16 (update the taken-over `Recording` row
+  on success, Section 7 - the first step that makes a finished catchup
+  recording actually show up as playable in Dispatcharr) regardless, per
+  the same instruction to keep building through what doesn't depend on
+  that answer.
