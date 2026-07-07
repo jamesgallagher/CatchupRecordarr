@@ -70,7 +70,7 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.18.0**, pushed and tag-verified reachable.
+- Current version: **v0.19.0**, pushed and tag-verified reachable.
 - **`tick.py`'s `GRACE_PERIOD` is temporarily 5 minutes, not the real
   15-minute default** — a deliberate, flagged debug-speed change
   (Session 40), not a design decision. Revert to `timedelta(minutes=15)`
@@ -1172,13 +1172,27 @@ Failure of check 1 is systemic — flag the account/source, not one job.
 
 ---
 
-## Section 11 — Output Format `[~] DECIDED`
+## Section 11 — Output Format `[x] BUILT`
 
 Final output is always MKV, produced by the same segment-concatenation
 step as Section 9. This is not a new convention — it matches what native
 Dispatcharr recordings already produce (raw `.ts` is never the final
 format even for live capture), so there's no compatibility risk with
 playback, comskip, or the Recordings UI.
+
+**Built, Session 43 (step 13, v0.19.0):** `stitch.py`'s `stitch_segments()`
+— ffmpeg concat demuxer, `-c copy` (plain remux, no re-encode, matching
+native Dispatcharr's own HLS-concat approach), `-fflags +genpts
+-avoid_negative_ts make_zero` per Section 9's accepted stitch-boundary
+mitigation. Atomic `.part.mkv`-then-rename, same pattern as segment
+fetching. Wired into `tick.py`: the moment a job's last segment completes
+(`state.all_segments_completed()`), stitching runs automatically and the
+job moves to a new non-terminal `'stitched'` status — not `'completed'`
+yet, since validation (step 14) and the Recording-row update (step 16)
+haven't run. Output lands at
+`catchup_recordarr_data/output/{recording_id}.mkv`. Not yet verified
+against a real multi-segment recording (blocked on the same open
+provider question as step 11/12 — Sessions 37–42).
 
 ---
 
@@ -1568,7 +1582,9 @@ each step names the design section(s) it implements.
     the Session 38 disk-existence refinement, plus a Content-Type sniff
     alongside the 1MB threshold. See Section 9 for the retry-backoff
     fix this step required in practice.
-13. Stitching: concatenate completed segments into the final MKV.
+13. **Built, Session 43 (v0.19.0):** Stitching: concatenate completed
+    segments into the final MKV (`stitch.py`, ffmpeg concat, see
+    Section 11).
 
 **Phase G — Validation (Section 10)**
 14. Post-stitch `ffprobe` duration + playability checks.
@@ -2638,8 +2654,29 @@ diverges from the sections above.)*
   being retried on its own once this version is running, up to ~75
   minutes before a possible auto-fail, which the user should be aware of
   before updating. Not yet verified end-to-end on the real deployment.
-  **Next:** user updates to v0.18.0 and watches recording 33 (and
-  whatever else is pending) get real automatic fetch attempts in the
-  logs; once that's confirmed working mechanically (regardless of
-  whether the provider itself is ready yet), continue to step 13
-  (stitching completed segments into a final MKV).
+  Continued straight on to step 13 per the same instruction: new
+  `stitch.py` module (`stitch_segments()`) concatenates a job's completed
+  segments via ffmpeg's concat demuxer, `-c copy` remux (no re-encode,
+  matching native Dispatcharr's own HLS-concat precedent), with the
+  `-fflags +genpts -avoid_negative_ts make_zero` treatment Section 9
+  already specified as the accepted (not fully-resolving) mitigation for
+  the parked stitch-boundary risk. Atomic `.part.mkv`-then-rename, same
+  pattern as segment fetching. Wired into `tick.py`: `state.all_segments_completed()`
+  triggers `_stitch_job()` automatically the moment a job's last segment
+  finishes - the existing per-segment atomic claim already guarantees
+  only one process ever completes a job's *last* segment, so no separate
+  lock was needed to stop two processes stitching the same job twice.
+  Added a new non-terminal job status, `'stitched'` (all segments down
+  and concatenated, but validation/step 14 and the Recording-row
+  update/step 16 haven't run yet) - deliberately not `'completed'` yet,
+  matching Section 7's ordering rule against marking something finished
+  before it's actually verified. Bumped to v0.19.0, pushed, tag-verified
+  reachable. Not yet verified against a real multi-segment recording -
+  blocked on the same open provider question as steps 11/12.
+  **Next:** user updates to v0.19.0; once step 11/12 are confirmed
+  working against a real available archive window (Sessions 37-42's
+  open question), watch a job actually reach `'stitched'` and produce a
+  real `.mkv` file. Otherwise continuing to step 14 (post-stitch
+  `ffprobe` duration + playability validation) regardless, per the same
+  instruction to keep building through what doesn't depend on that
+  answer.

@@ -36,7 +36,11 @@ SCHEMA_VERSION = "1"
 # Full Section 6 schema. Job identity is the native Recording.id (the
 # plugin acts on existing native rows, it never invents its own job ids).
 # Statuses are plain strings matching the design's state machines:
-#   jobs:     pending / in_progress / completed / failed
+#   jobs:     pending / in_progress / stitched / completed / failed
+#             ('stitched' added step 13 - every segment fetched and
+#             concatenated, but validation/step 14 and the Recording-row
+#             update/step 16 haven't run yet, so it isn't 'completed' in
+#             Section 7's sense; non-terminal, same as pending/in_progress)
 #   segments: pending / in_progress / completed  (failure -> back to
 #             pending, Section 9 - deliberately no dead-end state)
 # account_dialects holds Section 8's per-M3UAccount timeshift dialect.
@@ -367,6 +371,27 @@ def get_segments(recording_id):
                 }
                 for r in rows
             ]
+        finally:
+            conn.close()
+
+
+def all_segments_completed(recording_id):
+    """True once every planned segment for recording_id is 'completed' -
+    step 13's trigger for stitching. False if no segments are planned yet
+    (never true for a job that hasn't reached planning) or any segment is
+    still pending/in_progress.
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*), "
+                "SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) "
+                "FROM segments WHERE recording_id = ?",
+                (recording_id,),
+            ).fetchone()
+            total, completed = row[0], row[1] or 0
+            return total > 0 and total == completed
         finally:
             conn.close()
 

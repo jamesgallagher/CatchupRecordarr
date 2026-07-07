@@ -288,16 +288,21 @@ class Plugin:
             if not recording_ids:
                 lines.append("No non-terminal jobs found.")
             for rid in recording_ids:
+                job = state.get_job(rid)
+                job_status = job["status"] if job else "?"
                 segments = state.get_segments(rid)
                 if not segments:
-                    lines.append(f"recording {rid}: no segments planned yet")
+                    lines.append(f"recording {rid} [{job_status}]: no segments planned yet")
                     continue
                 seg_summary = ", ".join(
                     f"#{s['idx']} {s['start_utc']} ({s['duration_minutes']}m) [{s['status']}"
                     + (f", {s['retry_count']} failed attempt(s)]" if s["retry_count"] else "]")
                     for s in segments
                 )
-                lines.append(f"recording {rid} ({len(segments)} segment(s)): {seg_summary}")
+                extra = ""
+                if job_status == "stitched":
+                    extra = f" -> stitched to {state.get(f'stitched_output_path:{rid}')}"
+                lines.append(f"recording {rid} [{job_status}] ({len(segments)} segment(s)): {seg_summary}{extra}")
 
             # Terminal failures don't show up above once
             # non_terminal_job_recording_ids() stops returning them

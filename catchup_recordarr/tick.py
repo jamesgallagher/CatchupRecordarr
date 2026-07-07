@@ -37,6 +37,7 @@ from .archive import catchup_capable_stream_for_channel, channel_archive_retenti
 from .download import fetch_segment
 from .planning import SEGMENT_MINUTES, plan_segments
 from .provider import resolve_provider_timezone
+from .stitch import stitch_segments
 
 logger = logging.getLogger(__name__)
 
@@ -311,8 +312,63 @@ def _fetch_claimed_segment(rid, segment):
             "%s recording %s segment #%s: fetched successfully (%d bytes)",
             LOG_TAG, rid, segment["idx"], os.path.getsize(dest_path),
         )
+        if state.all_segments_completed(rid):
+            _stitch_job(rid)
     else:
         _fail_segment_and_maybe_job(rid, segment, error)
+
+
+def _stitch_job(rid):
+    """Step 13 - every segment for this job just finished; concatenate
+    them into the final MKV (Section 9/11). The claim mechanism already
+    guarantees only one process can ever complete a job's *last* segment
+    (each segment claim is mutually exclusive), so only that one process
+    ever observes all_segments_completed() flip to True - no separate
+    lock needed to stop two processes stitching the same job twice.
+    """
+    segments = sorted(state.get_segments(rid), key=lambda s: s["idx"])
+    segment_paths = [s["file_path"] for s in segments]
+    if any(p is None for p in segment_paths):
+        # Shouldn't happen - all_segments_completed() only returns True
+        # when every segment's status is 'completed', and mark_segment_completed()
+        # always sets file_path in the same call. Defensive, not expected.
+        logger.error(
+            "%s recording %s: all segments marked completed but at least "
+            "one has no file_path recorded - cannot stitch",
+            LOG_TAG, rid,
+        )
+        state.set_job_status(rid, "failed", "internal error: a completed segment has no file_path")
+        return
+
+    output_path = os.path.join(state.DATA_DIR, "output", f"{rid}.mkv")
+    logger.info(
+        "%s recording %s: all %d segment(s) fetched - stitching into %s",
+        LOG_TAG, rid, len(segment_paths), output_path,
+    )
+    success, error = stitch_segments(segment_paths, output_path)
+    if success:
+        state.set(f"stitched_output_path:{rid}", output_path)
+        # 'stitched' - an intermediate non-terminal status beyond the
+        # pending/in_progress/completed/failed set state.py originally
+        # documented (Section 6): all segments are down and concatenated,
+        # but validation (step 14) and the Recording-row update (step 16)
+        # haven't run yet, so this isn't 'completed' in Section 7's sense.
+        # Still excluded from nothing - non_terminal_job_recording_ids()
+        # keeps returning it (correctly - there's still work to do), but
+        # _process_segments() finds no pending segment to claim for it,
+        # so it just sits harmlessly until step 14 picks it up.
+        state.set_job_status(rid, "stitched")
+        logger.info(
+            "%s recording %s: stitched successfully -> %s (%d bytes)",
+            LOG_TAG, rid, output_path, os.path.getsize(output_path),
+        )
+    else:
+        state.set_job_status(rid, "failed", f"stitching failed: {error}")
+        logger.error(
+            "%s recording %s: stitching failed - %s - job marked "
+            "permanently failed",
+            LOG_TAG, rid, error,
+        )
 
 
 def _process_segments():
@@ -349,9 +405,21 @@ def fetch_one_segment_now():
         updated = next(
             (s for s in state.get_segments(rid) if s["idx"] == segment["idx"]), None
         )
-        if updated and updated["status"] == "completed":
-            return f"recording {rid} segment #{segment['idx']}: fetched successfully -> {updated['file_path']}"
         job = state.get_job(rid)
+        if updated and updated["status"] == "completed":
+            if job and job["status"] == "stitched":
+                path = state.get(f"stitched_output_path:{rid}")
+                return (
+                    f"recording {rid} segment #{segment['idx']}: fetched successfully "
+                    f"-> {updated['file_path']} - that was the last segment, and "
+                    f"stitching succeeded -> {path}"
+                )
+            if job and job["status"] == "failed":
+                return (
+                    f"recording {rid} segment #{segment['idx']}: fetched successfully, "
+                    f"but that was the last segment and stitching failed - {job['last_error']}"
+                )
+            return f"recording {rid} segment #{segment['idx']}: fetched successfully -> {updated['file_path']}"
         if job and job["status"] == "failed":
             return f"recording {rid} segment #{segment['idx']}: failed and job is now permanently failed - {job['last_error']}"
         return (
