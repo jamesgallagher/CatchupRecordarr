@@ -167,6 +167,24 @@ def create_job(recording_id):
             conn.close()
 
 
+def delete_job(recording_id):
+    """Remove a job and its segments (ON DELETE CASCADE) entirely.
+
+    Distinct from Section 9's segment-level orphan recovery, which assumes
+    the job's Recording still exists and only a fetch stalled - this is
+    for when the Recording itself has been deleted out from under a
+    still-open job (Session 39), which the original design never
+    considered. Called by tick.py's reaper once a non-terminal job's
+    recording_id no longer resolves to a real Recording.
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM jobs WHERE recording_id = ?", (recording_id,))
+        finally:
+            conn.close()
+
+
 def get_account_dialect(m3u_account_id):
     """Section 8's per-account dialect memory. Returns None if never
     recorded (cold start - caller defaults to 'path' per Sportarr's own

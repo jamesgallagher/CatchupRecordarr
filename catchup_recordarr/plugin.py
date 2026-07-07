@@ -238,6 +238,7 @@ class Plugin:
             }
 
         if action_id == "run_status_tick":
+            tick._reap_orphaned_jobs()
             tick._mark_interrupted_if_due()
             tick._check_post_air_ready()
             log.info("%s status tick run manually", LOG_TAG)
@@ -355,6 +356,12 @@ class Plugin:
             from .download import fetch_segment
             from .provider import resolve_provider_timezone
 
+            # Reap first (Session 39): a job's Recording can have been
+            # deleted in Dispatcharr since it was last seen, and without
+            # this the loop below can hand back a recording_id that no
+            # longer resolves to a real row.
+            tick._reap_orphaned_jobs()
+
             target_rid = None
             target_segment = None
             for rid in state.non_terminal_job_recording_ids():
@@ -370,7 +377,21 @@ class Plugin:
                     "message": "No pending segments found - run 'Run Status Tick Now' first to plan some.",
                 }
 
-            rec = Recording.objects.select_related("channel").get(id=target_rid)
+            try:
+                rec = Recording.objects.select_related("channel").get(id=target_rid)
+            except Recording.DoesNotExist:
+                # Belt-and-braces: the reap above closes the normal window,
+                # but the Recording could still vanish between that check
+                # and this one. Clean up and report instead of crashing.
+                state.delete_job(target_rid)
+                return {
+                    "status": "ok",
+                    "message": (
+                        f"Recording {target_rid} no longer exists - its stale "
+                        "catchup job has been removed. Run this action again "
+                        "to try the next pending segment, if any."
+                    ),
+                }
             stream = catchup_capable_stream_for_channel(rec.channel) if rec.channel else None
             if not stream or not stream.m3u_account or stream.stream_id is None:
                 return {

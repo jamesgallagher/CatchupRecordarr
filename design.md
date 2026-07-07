@@ -48,7 +48,7 @@ may describe intent that shifts slightly once real code is written.
 
 ---
 
-## Current Status Snapshot (updated 2026-07-05, end of Session 36)
+## Current Status Snapshot (updated 2026-07-07, end of Session 39)
 
 **For picking this up on a different machine.** The Session Log below has
 the full history; this block is just the fast-orientation version.
@@ -70,7 +70,7 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.17.1**, pushed and tag-verified reachable.
+- Current version: **v0.17.2**, pushed and tag-verified reachable.
 
 **Build progress:** steps 1–10 of Section 15's build plan are done; step
 11 (single-segment fetch) is functionally built and *has* successfully
@@ -79,6 +79,28 @@ but the most recent real test 404s (see below) — step 11 isn't fully
 closed out until that's understood. Steps 12–20 haven't started. Mirror
 this in the task list (`TaskCreate`/`TaskUpdate`) when resuming — task
 #11 should stay `in_progress` until the 404 investigation resolves.
+
+**Resolved, Session 39: a stale-job crash, distinct from the outage
+investigation below.** Retesting "Fetch One Pending Segment Now" hit
+`Recording matching query does not exist` (Django's `DoesNotExist`,
+`plugin.py`'s `fetch_test_segment` action, `Recording.objects.get(id=target_rid)`)
+— a job for one of the earlier throwaway test recordings (25/26/27) had
+its underlying `Recording` deleted from Dispatcharr at some point, but
+the plugin's SQLite job/segment state had no way to find out, since only
+`post_save` is wired (Section 5 Part A), nothing on delete. This is a
+new case, not a duplicate of Section 9's segment-level orphan recovery —
+that assumes the job's `Recording` still exists and only a *fetch*
+stalled; here the job's whole subject was gone. Fixed in v0.17.2: a new
+`tick._reap_orphaned_jobs()` checks every non-terminal job's
+`recording_id` against real `Recording` rows and deletes (via the new
+`state.delete_job()`, cascading to its segments) any that no longer
+resolve. Runs at the start of every 60s tick, and is also called
+defensively — plus a belt-and-braces `try/except Recording.DoesNotExist`
+around the `.get()` itself — from `fetch_test_segment` and
+`run_status_tick`, so a manual click reaps immediately rather than
+waiting for the next tick. Worth folding this same reap-before-claim
+pattern into step 12's real orchestration when it's built, not just this
+one test action.
 
 **Resolved this session (Sessions 35–36): a real credential leak.**
 `requests` exceptions embed the full request URL (including Xtream
@@ -163,15 +185,19 @@ added to this plugin. No code changed this session.
 
 **Immediate next steps, in order, once the provider is confirmed back
 up (the user is tracking this themselves, no need to ask):**
-1. Get a clean retest result (provider up) of "Fetch One Pending Segment
-   Now" against v0.17.1. If it succeeds, step 11 is done — move to step
-   12. If it still fails, use `describe_redirect_chain()`'s output to
-   check whether headers/cookies are actually surviving the redirect
-   chain (the item above) before assuming anything else is wrong.
+1. User updates to v0.17.2 and re-runs "Fetch One Pending Segment Now" —
+   confirms the Session 39 stale-job crash is gone (any leftover jobs
+   for deleted recordings get silently reaped and logged, not thrown as
+   an error) and get a clean retest result. If it succeeds, step 11 is
+   done — move to step 2. If it still fails on the provider side, use
+   `describe_redirect_chain()`'s output to check whether headers/cookies
+   are actually surviving the redirect chain (the item above) before
+   assuming anything else is wrong.
 2. Once the fetch is genuinely working, build step 12 (segment state
    machine + retry cap + orphan recovery, Section 9) — design already
    fully specified there, now including the two Mustarrd-derived
-   refinements above (Content-Type sniff, disk-size orphan check).
+   refinements (Content-Type sniff, disk-size orphan check) and
+   Session 39's reap-before-claim pattern for a deleted `Recording`.
 3. Steps 13–20 follow per Section 15, same test-and-confirm-before-
    proceeding pattern used throughout this build.
 
@@ -945,6 +971,24 @@ given each segment already has its own tracked file path (Section 6).
 Our segmented design already has a structural edge here Mustarrd's
 whole-file model lacks: a crash only ever needs to redo whichever
 segment was in flight, never the whole job.
+
+**Job-level orphan recovery, new case found in practice (Session 39):
+the Recording itself can disappear, not just the fetch stalling.** The
+recovery above (and Section 10's job-level equivalent) both assume the
+job's underlying `Recording` row still exists and only the *in-progress
+work* needs resuming. That assumption broke on the real deployment: a
+job for a since-deleted `Recording` (one of the early throwaway test
+recordings) sat in the `jobs` table indefinitely, since nothing reacts
+to a `Recording` being deleted (only `post_save` is wired, Section 5
+Part A) — and `fetch_test_segment` crashed with Django's
+`Recording.DoesNotExist` when it assumed every non-terminal job had a
+live row behind it. Fixed via `tick._reap_orphaned_jobs()`: at the start
+of every tick, check each non-terminal job's `recording_id` against real
+`Recording` rows and delete (cascading to segments) any that no longer
+resolve. This is a distinct failure mode from the in-progress/crash
+orphan case above — worth folding the same reap-before-claim step into
+step 12's real claim→fetch→mark orchestration, not just leaving it in
+the one test action that happened to hit it first.
 
 ## Section 10 — Failure, Retry & Crash Recovery (Job-Level) `[~] DECIDED (design only)`
 
@@ -2317,3 +2361,37 @@ diverges from the sections above.)*
   blocked on the provider coming back up for a clean step-11 retest
   (Session 37) - once that's clean, build step 12 incorporating both
   the Content-Type sniff and the disk-size orphan check noted above.
+
+- **Session 39** (2026-07-07) - User retested "Fetch One Pending Segment
+  Now" and hit a new crash: `{"success": false, "error": "Recording
+  matching query does not exist."}`. Traced to `plugin.py`'s
+  `fetch_test_segment` action (`Recording.objects.select_related("channel").get(id=target_rid)`)
+  - `target_rid` comes from the plugin's own SQLite `jobs` table
+  (`state.non_terminal_job_recording_ids()`), and one of the earlier
+  throwaway test recordings (25/26/27, used across Sessions 27-34) had
+  been deleted from Dispatcharr at some point since, but the plugin's
+  state store had no way to learn that (only `post_save` is wired,
+  Section 5 Part A - nothing reacts to a deletion). This is a genuinely
+  new failure mode, not a duplicate of Section 9's existing segment/job
+  orphan recovery - those both assume the `Recording` still exists and
+  only in-progress *work* needs resuming after a crash; here the job's
+  entire subject was gone. Fixed in v0.17.2: added `state.delete_job()`
+  (deletes a `jobs` row, cascading to its `segments` via the existing FK)
+  and `tick._reap_orphaned_jobs()` (checks every non-terminal job's
+  `recording_id` against real `Recording` rows, reaps any that don't
+  resolve) - wired into the 60s tick loop, `run_status_tick`, and
+  `fetch_test_segment` (called defensively before it picks a candidate,
+  plus a belt-and-braces `try/except Recording.DoesNotExist` around the
+  `.get()` itself as a last resort). Written up in Section 9 and the
+  Snapshot as a new case alongside the existing orphan-recovery
+  reasoning, flagged for folding into step 12's real orchestration too,
+  not just this one test action. Bumped to v0.17.2. **Next:** user
+  updates to v0.17.2, restarts, and re-runs "Fetch One Pending Segment
+  Now" - expect either a clean fetch result (if the provider is back up)
+  or the same outage-related failure from Sessions 37-38, but *not* the
+  DoesNotExist crash; if any stale jobs existed they should be silently
+  reaped (a `removing its catchup job/segment state` warning in the
+  logs) and the action should move on to the next real candidate, if any
+  remain, or report "No pending segments found." Otherwise unchanged
+  from Session 38's Snapshot: once a clean provider-up retest of step 11
+  succeeds, build step 12.

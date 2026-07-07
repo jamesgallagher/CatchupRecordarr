@@ -52,6 +52,38 @@ _tick_started = False
 _tick_lock = threading.Lock()
 
 
+def _reap_orphaned_jobs():
+    """A taken-over job's Recording can be deleted out from under it -
+    the user removing a recording in Dispatcharr's UI, or an old
+    throwaway test recording being cleaned up - and the plugin has no
+    signal to react to that (only post_save is wired, Section 5 Part A).
+    Left unreaped, a stale recording_id sitting in the jobs table breaks
+    any code that assumes "every non-terminal job has a live Recording" -
+    confirmed in practice (Session 39): fetch_test_segment's
+    `Recording.objects.get(id=...)` raised DoesNotExist against a real
+    deployment. This is a different case from Section 9's segment-level
+    orphan recovery, which assumes the Recording still exists and only a
+    fetch stalled - here the job's whole subject is gone. Runs at the
+    start of every tick, and is also called defensively by any one-off
+    action that's about to pick a "next" job, so it's never more than one
+    tick stale either way.
+    """
+    recording_ids = state.non_terminal_job_recording_ids()
+    if not recording_ids:
+        return
+    existing_ids = set(
+        Recording.objects.filter(id__in=recording_ids).values_list("id", flat=True)
+    )
+    for rid in recording_ids:
+        if rid not in existing_ids:
+            logger.warning(
+                "%s recording %s: underlying Recording no longer exists "
+                "(deleted) - removing its catchup job/segment state",
+                LOG_TAG, rid,
+            )
+            state.delete_job(rid)
+
+
 def _mark_interrupted_if_due():
     now = timezone.now()
     recording_ids = state.non_terminal_job_recording_ids()
@@ -146,6 +178,7 @@ def _tick_loop():
     while True:
         try:
             close_old_connections()
+            _reap_orphaned_jobs()
             _mark_interrupted_if_due()
             _check_post_air_ready()
         except Exception:
