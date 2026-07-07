@@ -1,8 +1,9 @@
-"""Status-transition tick (#13) + post-air detection (Section 5 Part B).
+"""Status-transition tick (#13) + post-air detection (Section 5 Part B)
++ segment orchestration (Section 9, step 12).
 
-Two checks on one shared schedule, folded into a single thread
+Several checks on one shared schedule, folded into a single thread
 deliberately (noted as a TODO when step 5 was built standalone, done now
-that step 6 exists):
+that step 6 exists) rather than one scheduler per concern:
 
 1. Flip a taken-over Recording's status to "interrupted" (+ a friendly
    reason) once start_time has passed, so the native UI stops showing a
@@ -10,16 +11,20 @@ that step 6 exists):
    the badge is purely time-based (start <= now < end, RecordingCard.jsx)
    - it has no way to know a plugin cancelled the native capture.
 
-2. Detect when a taken-over recording's window has closed (+ grace),
-   plan its segments (Section 9, step 10) if not already planned, and
-   log that it's ready for a catchup fetch. No actual fetching yet -
-   that's step 11.
+2. Detect when a taken-over recording's window has closed (+ grace) and
+   plan its segments (Section 9, step 10) if not already planned.
+
+3. Recover segments left in_progress by a crashed/restarted process, and
+   claim + fetch the next pending segment for each non-terminal job
+   (step 12) - real network calls, one claim attempt per job per tick
+   pass, never concurrent (Section 9).
 """
 
 import logging
+import os
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from django.db import close_old_connections
 from django.utils import timezone
@@ -28,8 +33,10 @@ from apps.channels.models import Recording
 
 from . import state
 from ._version import LOG_TAG
-from .archive import channel_archive_retention_days
+from .archive import catchup_capable_stream_for_channel, channel_archive_retention_days
+from .download import fetch_segment
 from .planning import SEGMENT_MINUTES, plan_segments
+from .provider import resolve_provider_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +58,23 @@ INTERRUPTED_REASON = (
 # step 11/12 - real value is 15 minutes, revert once the live->timeshift
 # lag is actually known. See design.md Session 40.
 GRACE_PERIOD = timedelta(minutes=5)
+
+# Section 9 - hardcoded, 5 attempts, no separate backoff timer was the
+# original reasoning ("the existing 5-15 min poll cadence already spaces
+# retries out naturally"). That assumption didn't match what actually got
+# built: the tick runs every 60 seconds, not every 5-15 minutes, so
+# without an explicit backoff the cap would exhaust itself in 5 *minutes*
+# against a provider that (per Sessions 40-42's real-world testing) can
+# genuinely take 20-30+ minutes to finalize a window. SEGMENT_RETRY_BACKOFF
+# below fixes that gap - deliberately its own constant, not tied to
+# GRACE_PERIOD above, since GRACE_PERIOD is currently an intentionally-
+# shortened debug value (Session 40) and this retry spacing needs a safer,
+# more conservative number until the real provider lag is known. At 15
+# minutes x 5 attempts, a job gets up to 75 minutes of retrying before its
+# segment is marked permanently failed - matching Section 9's originally
+# intended "25-75 minutes" range.
+MAX_SEGMENT_ATTEMPTS = 5
+SEGMENT_RETRY_BACKOFF = timedelta(minutes=15)
 
 _tick_started = False
 _tick_lock = threading.Lock()
@@ -160,21 +184,182 @@ def _check_post_air_ready():
                 rec.start_time, rec.end_time,
             )
 
-        # Log "ready" once per job, not every tick, since nothing fetches
-        # a planned segment yet (step 11 isn't built) - without this a
-        # job would otherwise re-log every 60s for as long as its
-        # retention window stays open, potentially days.
+        # Log "ready" once per job, not every tick - without this a job
+        # would otherwise re-log every 60s for as long as it sits pending
+        # (e.g. while _process_segments below is still working through
+        # its retry backoff).
         if state.get(f"post_air_ready_logged:{rec.id}"):
             continue
         program = (rec.custom_properties or {}).get("program") or {}
         logger.info(
             "%s recording %s ('%s' on channel '%s') ready for catchup fetch "
-            "(window closed %s ago) - segments planned, no fetch yet "
-            "(step 11 not built)",
+            "(window closed %s ago) - segments planned, fetching will begin "
+            "this tick or next",
             LOG_TAG, rec.id, program.get("title", "?"),
             getattr(rec.channel, "name", "?"), now - rec.end_time,
         )
         state.set(f"post_air_ready_logged:{rec.id}", "1")
+
+
+def _recover_orphaned_segments():
+    """Section 9's segment-level orphan recovery, refined per Session 38's
+    Mustarrd comparison. A segment found in_progress at the start of a
+    NEW tick can only be a leftover from a crash/restart mid-fetch -
+    Section 9 already commits to strictly sequential (non-concurrent)
+    processing, so a segment can never legitimately still be "being
+    worked on" once a new tick pass begins; that work would have already
+    finished, synchronously, within the tick that claimed it.
+
+    Before blindly resetting to pending (and re-fetching from scratch),
+    check whether the segment's file already exists on disk. Unlike
+    Mustarrd's byte-count bookkeeping, our own atomic rename in
+    download.py means this check is just "does the final path exist" -
+    the .part-file-then-rename pattern guarantees the final path is only
+    ever created once a fetch fully completed and passed the not-ready
+    threshold, so existence alone proves it finished pre-crash and just
+    never got marked complete in the state store.
+    """
+    for seg in state.in_progress_segments():
+        rid, idx = seg["recording_id"], seg["idx"]
+        expected_path = os.path.join(
+            state.DATA_DIR, "segments", str(rid), f"segment_{idx:04d}.ts"
+        )
+        if os.path.exists(expected_path):
+            state.mark_segment_completed(rid, idx, expected_path)
+            logger.info(
+                "%s recording %s segment #%s: found already completed on "
+                "disk after a restart - marking completed, not re-fetching",
+                LOG_TAG, rid, idx,
+            )
+        else:
+            state.reset_segment_to_pending(rid, idx)
+            logger.warning(
+                "%s recording %s segment #%s: was in_progress at tick "
+                "start with no file on disk - crash/restart mid-fetch, "
+                "resetting to pending",
+                LOG_TAG, rid, idx,
+            )
+
+
+def _fail_segment_and_maybe_job(rid, segment, error):
+    """A real fetch attempt failed (both dialects). Bump the segment's
+    retry_count; once it hits the cap, mark the whole *job* permanently
+    failed with a specific reason (Section 9) rather than waiting on the
+    retention-based cutoff (step 15) to eventually notice. The segment
+    itself has no separate dead-end state either way - it goes back to
+    'pending', but a failed job is filtered out of
+    non_terminal_job_recording_ids() so it's never claimed again.
+    """
+    retry_count = segment["retry_count"] + 1
+    state.record_segment_attempt_failure(rid, segment["idx"], error, retry_count)
+    if retry_count >= MAX_SEGMENT_ATTEMPTS:
+        reason = f"segment {segment['idx']} failed after {retry_count} attempts: {error}"
+        state.set_job_status(rid, "failed", reason)
+        logger.error(
+            "%s recording %s: %s - job marked permanently failed",
+            LOG_TAG, rid, reason,
+        )
+    else:
+        logger.warning(
+            "%s recording %s segment #%s: attempt %d/%d failed (%s), will "
+            "retry no sooner than %s from now",
+            LOG_TAG, rid, segment["idx"], retry_count, MAX_SEGMENT_ATTEMPTS,
+            error, SEGMENT_RETRY_BACKOFF,
+        )
+
+
+def _fetch_claimed_segment(rid, segment):
+    """Resolve everything fetch_segment() needs for an already-claimed
+    segment, run the real fetch, and persist the result. Shared by the
+    automatic per-tick orchestration below and the manual "Fetch One
+    Pending Segment Now" action (plugin.py), so there's exactly one code
+    path that actually talks to a provider for a segment, not two
+    diverging implementations.
+    """
+    try:
+        rec = Recording.objects.select_related("channel").get(id=rid)
+    except Recording.DoesNotExist:
+        # _reap_orphaned_jobs() normally catches this before we ever get
+        # here, but the Recording could vanish in the gap between that
+        # check and this one - don't leave the segment stuck in_progress.
+        state.reset_segment_to_pending(rid, segment["idx"])
+        state.delete_job(rid)
+        return
+
+    stream = catchup_capable_stream_for_channel(rec.channel) if rec.channel else None
+    if not stream or not stream.m3u_account or stream.stream_id is None:
+        _fail_segment_and_maybe_job(
+            rid, segment, "could not resolve a catchup-capable stream/account for this recording"
+        )
+        return
+
+    tz = resolve_provider_timezone(stream.m3u_account)
+    start_utc = datetime.fromisoformat(segment["start_utc"])
+    start_local = start_utc.astimezone(tz)
+    dest_path = os.path.join(
+        state.DATA_DIR, "segments", str(rid), f"segment_{segment['idx']:04d}.ts"
+    )
+
+    success, error = fetch_segment(
+        stream.m3u_account, stream.stream_id, start_local,
+        segment["duration_minutes"], dest_path,
+    )
+
+    if success:
+        state.mark_segment_completed(rid, segment["idx"], dest_path)
+        logger.info(
+            "%s recording %s segment #%s: fetched successfully (%d bytes)",
+            LOG_TAG, rid, segment["idx"], os.path.getsize(dest_path),
+        )
+    else:
+        _fail_segment_and_maybe_job(rid, segment, error)
+
+
+def _process_segments():
+    """Step 12 - the real claim -> fetch -> mark orchestration, one
+    claim attempt per non-terminal job per tick pass. Deliberately a
+    plain sequential for-loop (not threads/async): Section 9 committed
+    to never fetching concurrently, and that has to hold across every
+    process running its own copy of this thread too, which is what
+    state.claim_next_pending_segment()'s atomic claim guarantees - only
+    one process can ever be mid-fetch for a given segment (or, via the
+    NOT EXISTS check inside that claim, a given job) at a time.
+    """
+    for rid in state.non_terminal_job_recording_ids():
+        segment = state.claim_next_pending_segment(rid, SEGMENT_RETRY_BACKOFF)
+        if segment is not None:
+            _fetch_claimed_segment(rid, segment)
+
+
+def fetch_one_segment_now():
+    """On-demand version of _process_segments() for the manual "Fetch One
+    Pending Segment Now" action (plugin.py) - claims and fetches the
+    first available segment across any non-terminal job, through the
+    exact same state.claim_next_pending_segment()/_fetch_claimed_segment()
+    path the automatic tick uses, so a manual click can never race or
+    diverge from what the tick itself would have done. Returns a short
+    human-readable status string for the action's response.
+    """
+    _reap_orphaned_jobs()
+    for rid in state.non_terminal_job_recording_ids():
+        segment = state.claim_next_pending_segment(rid, SEGMENT_RETRY_BACKOFF)
+        if segment is None:
+            continue
+        _fetch_claimed_segment(rid, segment)
+        updated = next(
+            (s for s in state.get_segments(rid) if s["idx"] == segment["idx"]), None
+        )
+        if updated and updated["status"] == "completed":
+            return f"recording {rid} segment #{segment['idx']}: fetched successfully -> {updated['file_path']}"
+        job = state.get_job(rid)
+        if job and job["status"] == "failed":
+            return f"recording {rid} segment #{segment['idx']}: failed and job is now permanently failed - {job['last_error']}"
+        return (
+            f"recording {rid} segment #{segment['idx']}: fetch failed "
+            f"(attempt {updated['retry_count'] if updated else '?'}/{MAX_SEGMENT_ATTEMPTS}) - "
+            f"{updated['last_error'] if updated else 'see logs'}"
+        )
+    return "No claimable segments right now (none pending, or all mid-retry-backoff)."
 
 
 def _tick_loop():
@@ -185,6 +370,8 @@ def _tick_loop():
             _reap_orphaned_jobs()
             _mark_interrupted_if_due()
             _check_post_air_ready()
+            _recover_orphaned_segments()
+            _process_segments()
         except Exception:
             logger.exception("%s status-transition tick error", LOG_TAG)
         finally:

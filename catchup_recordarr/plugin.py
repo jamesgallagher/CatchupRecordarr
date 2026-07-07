@@ -1,5 +1,4 @@
 import logging
-import os
 import random
 import threading
 import time
@@ -193,10 +192,12 @@ class Plugin:
             "id": "run_status_tick",
             "label": "Run Status Tick Now",
             "description": (
-                "Immediately flip any taken-over recording within its air window "
-                "to 'interrupted', plan segments for any recording whose window "
-                "has closed, and log it as ready for a catchup fetch (no "
-                "download pipeline yet), instead of waiting up to 60 seconds."
+                "Immediately run everything the background tick does: flip "
+                "any taken-over recording within its air window to "
+                "'interrupted', plan segments for any recording whose window "
+                "has closed, recover any orphaned in-progress segments, and "
+                "attempt one real segment fetch per ready job - instead of "
+                "waiting up to 60 seconds."
             ),
             "button_label": "Run Now",
         },
@@ -206,7 +207,9 @@ class Plugin:
             "description": (
                 "Show planned segments for every taken-over job that hasn't "
                 "reached a terminal state yet - which windows were split into "
-                "which chunks, and each segment's current status."
+                "which chunks, each segment's current status and retry count "
+                "- plus any job that has hit the retry cap and been marked "
+                "permanently failed."
             ),
             "button_label": "List",
         },
@@ -245,11 +248,11 @@ class Plugin:
             "id": "fetch_test_segment",
             "label": "Fetch One Pending Segment Now",
             "description": (
-                "REAL download: fetches the first pending segment found across "
-                "all taken-over jobs from your actual provider, using dialect "
-                "fallback and the resolved UA/timezone. Does not mark the "
-                "segment completed (that's step 12) - this is a one-off test "
-                "of the fetch mechanism itself."
+                "REAL download: claims and fetches the next available segment "
+                "across all taken-over jobs from your actual provider (dialect "
+                "fallback, resolved UA/timezone), through the same persisted "
+                "claim/retry-cap path the automatic background tick uses - "
+                "runs it on demand instead of waiting for the next tick pass."
             ),
             "button_label": "Fetch",
         },
@@ -274,24 +277,39 @@ class Plugin:
             tick._reap_orphaned_jobs()
             tick._mark_interrupted_if_due()
             tick._check_post_air_ready()
+            tick._recover_orphaned_segments()
+            tick._process_segments()
             log.info("%s status tick run manually", LOG_TAG)
-            return {"status": "ok", "message": "Status tick complete - check logs for details."}
+            return {"status": "ok", "message": "Status tick complete (including a real segment-fetch attempt, if one was claimable) - check logs for details."}
 
         if action_id == "list_pending_segments":
             recording_ids = state.non_terminal_job_recording_ids()
-            if not recording_ids:
-                return {"status": "ok", "message": "No non-terminal jobs found."}
             lines = []
+            if not recording_ids:
+                lines.append("No non-terminal jobs found.")
             for rid in recording_ids:
                 segments = state.get_segments(rid)
                 if not segments:
                     lines.append(f"recording {rid}: no segments planned yet")
                     continue
                 seg_summary = ", ".join(
-                    f"#{s['idx']} {s['start_utc']} ({s['duration_minutes']}m) [{s['status']}]"
+                    f"#{s['idx']} {s['start_utc']} ({s['duration_minutes']}m) [{s['status']}"
+                    + (f", {s['retry_count']} failed attempt(s)]" if s["retry_count"] else "]")
                     for s in segments
                 )
                 lines.append(f"recording {rid} ({len(segments)} segment(s)): {seg_summary}")
+
+            # Terminal failures don't show up above once
+            # non_terminal_job_recording_ids() stops returning them
+            # (step 12) - surface them separately so a job hitting the
+            # retry cap doesn't just silently vanish (Section 14).
+            failed = state.failed_jobs()
+            if failed:
+                lines.append("")
+                lines.append(f"{len(failed)} permanently failed job(s):")
+                for job in failed:
+                    lines.append(f"  recording {job['recording_id']}: {job['last_error']}")
+
             return {"status": "ok", "message": "\n".join(lines)}
 
         if action_id == "test_timeshift_url":
@@ -383,85 +401,17 @@ class Plugin:
             return {"status": "ok", "message": "\n".join(results)}
 
         if action_id == "fetch_test_segment":
-            from apps.channels.models import Recording
-
-            from .archive import catchup_capable_stream_for_channel
-            from .download import fetch_segment
-            from .provider import resolve_provider_timezone
-
-            # Reap first (Session 39): a job's Recording can have been
-            # deleted in Dispatcharr since it was last seen, and without
-            # this the loop below can hand back a recording_id that no
-            # longer resolves to a real row.
-            tick._reap_orphaned_jobs()
-
-            target_rid = None
-            target_segment = None
-            for rid in state.non_terminal_job_recording_ids():
-                pending = [s for s in state.get_segments(rid) if s["status"] == "pending"]
-                if pending:
-                    target_rid = rid
-                    target_segment = pending[0]
-                    break
-
-            if not target_rid:
-                return {
-                    "status": "ok",
-                    "message": "No pending segments found - run 'Run Status Tick Now' first to plan some.",
-                }
-
-            try:
-                rec = Recording.objects.select_related("channel").get(id=target_rid)
-            except Recording.DoesNotExist:
-                # Belt-and-braces: the reap above closes the normal window,
-                # but the Recording could still vanish between that check
-                # and this one. Clean up and report instead of crashing.
-                state.delete_job(target_rid)
-                return {
-                    "status": "ok",
-                    "message": (
-                        f"Recording {target_rid} no longer exists - its stale "
-                        "catchup job has been removed. Run this action again "
-                        "to try the next pending segment, if any."
-                    ),
-                }
-            stream = catchup_capable_stream_for_channel(rec.channel) if rec.channel else None
-            if not stream or not stream.m3u_account or stream.stream_id is None:
-                return {
-                    "status": "ok",
-                    "message": f"Could not resolve a catchup-capable stream/account for recording {target_rid}.",
-                }
-
-            tz = resolve_provider_timezone(stream.m3u_account)
-            start_utc = datetime.fromisoformat(target_segment["start_utc"])
-            start_local = start_utc.astimezone(tz)
-            dest_path = os.path.join(
-                state.DATA_DIR, "segments", str(target_rid),
-                f"segment_{target_segment['idx']:04d}.ts",
-            )
-
-            log.info(
-                "%s test fetch: recording %s segment #%s -> %s (REAL download "
-                "against your provider)",
-                LOG_TAG, target_rid, target_segment["idx"], dest_path,
-            )
-            success, error = fetch_segment(
-                stream.m3u_account, stream.stream_id, start_local,
-                target_segment["duration_minutes"], dest_path,
-            )
-            if success:
-                size = os.path.getsize(dest_path)
-                log.info("%s test fetch succeeded: %s (%d bytes)", LOG_TAG, dest_path, size)
-                return {
-                    "status": "ok",
-                    "message": (
-                        f"Downloaded recording {target_rid} segment #{target_segment['idx']} "
-                        f"to {dest_path} ({size} bytes). Segment status not updated in the "
-                        f"DB - this was a one-off fetch test only (step 12 does that)."
-                    ),
-                }
-            log.warning("%s test fetch failed: %s", LOG_TAG, error)
-            return {"status": "ok", "message": f"Fetch failed: {error}"}
+            # Step 12 (v0.18.0): this now goes through the exact same
+            # claim -> fetch -> mark path the automatic tick uses
+            # (tick.fetch_one_segment_now()), rather than its own
+            # separate ad-hoc implementation that never persisted a
+            # result. Keeping two diverging "fetch a segment" code paths
+            # around would have meant they could race each other's claims
+            # or disagree about what "pending" means - now there's one.
+            log.info("%s manual fetch-one-segment action invoked (REAL download against your provider)", LOG_TAG)
+            result = tick.fetch_one_segment_now()
+            log.info("%s manual fetch-one-segment result: %s", LOG_TAG, result)
+            return {"status": "ok", "message": result}
 
         if action_id == "list_catchup_channels":
             from .archive import list_catchup_channels

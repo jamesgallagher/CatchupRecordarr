@@ -1,6 +1,6 @@
 {
     "name": "Catchup Recordarr",
-    "version": "0.17.4",
+    "version": "0.18.0",
     "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
     "author": "James",
     "help_url": "https://github.com/jamesgallagher/CatchupRecordarr",
@@ -27,13 +27,13 @@
         {
             "id": "run_status_tick",
             "label": "Run Status Tick Now",
-            "description": "Immediately flip any taken-over recording within its air window to 'interrupted', plan segments for any recording whose window has closed, and log it as ready for a catchup fetch (no download pipeline yet), instead of waiting up to 60 seconds.",
+            "description": "Immediately run everything the background tick does: flip any taken-over recording within its air window to 'interrupted', plan segments for any recording whose window has closed, recover any orphaned in-progress segments, and attempt one real segment fetch per ready job - instead of waiting up to 60 seconds.",
             "button_label": "Run Now"
         },
         {
             "id": "list_pending_segments",
             "label": "List Pending Segments",
-            "description": "Show planned segments for every taken-over job that hasn't reached a terminal state yet - which windows were split into which chunks, and each segment's current status.",
+            "description": "Show planned segments for every taken-over job that hasn't reached a terminal state yet - which windows were split into which chunks, each segment's current status and retry count - plus any job that has hit the retry cap and been marked permanently failed.",
             "button_label": "List"
         },
         {
@@ -57,7 +57,7 @@
         {
             "id": "fetch_test_segment",
             "label": "Fetch One Pending Segment Now",
-            "description": "REAL download: fetches the first pending segment found across all taken-over jobs from your actual provider, using dialect fallback and the resolved UA/timezone. Does not mark the segment completed (that's step 12) - this is a one-off test of the fetch mechanism itself.",
+            "description": "REAL download: claims and fetches the next available segment across all taken-over jobs from your actual provider (dialect fallback, resolved UA/timezone), through the same persisted claim/retry-cap path the automatic background tick uses - runs it on demand instead of waiting for the next tick pass.",
             "button_label": "Fetch"
         }
     ]

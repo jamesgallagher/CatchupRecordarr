@@ -6,8 +6,8 @@ finally puts fetch_with_fallback()'s injected callback to real use - no
 mock fetch functions past this point.
 
 Orchestration (claiming the next pending segment for a job, updating
-segment status, retry caps, orphan recovery) is step 12 - this module
-only knows how to fetch ONE already-chosen segment.
+segment status, retry caps, orphan recovery) lives in tick.py (step 12)
+- this module only knows how to fetch ONE already-chosen segment.
 """
 
 import logging
@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 # per-segment retry cap): hardcode a value with real precedent, add a
 # setting only if real-world testing shows it needs tuning.
 NOT_READY_THRESHOLD_BYTES = 1024 * 1024
+
+# Mustarrd refinement (Session 38, step 12): a second, faster "provider
+# error page" signal alongside the byte-size check above, not instead of
+# it - a genuinely too-small-but-correctly-typed response (Sportarr's
+# "archive not ready" case) still needs the size check to catch it, but
+# an HTML/JSON/XML response can be rejected the instant headers arrive,
+# without waiting to stream up to 1MB of it first.
+ERROR_PAGE_CONTENT_TYPE_PREFIXES = ("text/", "application/json", "application/xml")
 
 # Per-segment timeout, not the whole job's - archive pulls are usually
 # faster than realtime, but a throttled provider can drip-feed.
@@ -86,6 +94,13 @@ def _download(url, user_agent, dest_path):
             timeout=REQUEST_TIMEOUT_SECONDS,
         ) as resp:
             resp.raise_for_status()
+            content_type = resp.headers.get("Content-Type", "")
+            if any(content_type.startswith(p) for p in ERROR_PAGE_CONTENT_TYPE_PREFIXES):
+                # Bail before reading the body at all - this is a provider
+                # error/status page, not video data. Content-Type is a
+                # response header value, never the request URL or
+                # credentials, safe to include directly (Section 14).
+                return False, f"archive returned a non-video response (Content-Type: '{content_type}')"
             with open(part_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=64 * 1024):
                     if chunk:

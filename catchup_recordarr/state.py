@@ -131,9 +131,9 @@ def job_exists(recording_id):
 
 def non_terminal_job_recording_ids():
     """recording_ids for every job we've taken over that hasn't reached a
-    terminal state yet. 'completed'/'failed' aren't set anywhere yet
-    (Sections 7/10, not built) - filtering them out now anyway so this
-    doesn't need revisiting once those steps land.
+    terminal state yet. 'failed' is set as of step 12 (a segment
+    exhausting its retry cap); 'completed' will follow once
+    stitching/validation/Recording-update (steps 13-16) exist.
     """
     with _lock:
         conn = _connect()
@@ -142,6 +142,24 @@ def non_terminal_job_recording_ids():
                 "SELECT recording_id FROM jobs WHERE status NOT IN ('completed', 'failed')"
             ).fetchall()
             return [r[0] for r in rows]
+        finally:
+            conn.close()
+
+
+def failed_jobs():
+    """Every job in a terminal 'failed' state, with its reason - so a job
+    hitting the segment retry cap (Section 9) doesn't just silently
+    vanish from every list action once non_terminal_job_recording_ids()
+    stops returning it. Section 14's observability philosophy applies to
+    terminal failures as much as to in-flight state.
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT recording_id, last_error, updated_at FROM jobs WHERE status = 'failed'"
+            ).fetchall()
+            return [{"recording_id": r[0], "last_error": r[1], "updated_at": r[2]} for r in rows]
         finally:
             conn.close()
 
@@ -181,6 +199,47 @@ def delete_job(recording_id):
         conn = _connect()
         try:
             conn.execute("DELETE FROM jobs WHERE recording_id = ?", (recording_id,))
+        finally:
+            conn.close()
+
+
+def get_job(recording_id):
+    with _lock:
+        conn = _connect()
+        try:
+            row = conn.execute(
+                "SELECT recording_id, status, retry_count, last_error, "
+                "created_at, updated_at FROM jobs WHERE recording_id = ?",
+                (recording_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "recording_id": row[0],
+                "status": row[1],
+                "retry_count": row[2],
+                "last_error": row[3],
+                "created_at": row[4],
+                "updated_at": row[5],
+            }
+        finally:
+            conn.close()
+
+
+def set_job_status(recording_id, status, last_error=None):
+    """Step 12/15 - move a job to a terminal or updated status
+    ('failed' when a segment exhausts its retry cap, Section 9; later,
+    'completed' once stitching/validation/Recording-update succeed).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE jobs SET status = ?, last_error = ?, updated_at = ? "
+                "WHERE recording_id = ?",
+                (status, last_error, now, recording_id),
+            )
         finally:
             conn.close()
 
@@ -308,6 +367,145 @@ def get_segments(recording_id):
                 }
                 for r in rows
             ]
+        finally:
+            conn.close()
+
+
+def claim_next_pending_segment(recording_id, min_retry_age):
+    """Step 12 - atomically claim the lowest-idx pending segment for
+    recording_id, marking it in_progress and returning its row, or None
+    if nothing claimable right now.
+
+    Two conditions beyond plain "status = pending":
+    - A never-attempted segment (retry_count = 0) is claimable
+      immediately - the job's own post-air grace period has already
+      done the "don't rush the archive" waiting once, at the job level.
+    - A previously-failed segment (retry_count > 0) is only claimable
+      once min_retry_age (a timedelta) has passed since its last
+      attempt (tracked via its own updated_at) - spaces retries out so
+      the 5-attempt cap can't exhaust itself in minutes against a
+      provider that genuinely needs longer (Sessions 40-42's real-world
+      finding), without needing a separate backoff-timestamp column.
+    - Refuses to claim if another of this job's segments is already
+      in_progress, preserving Section 9's strictly-sequential
+      per-job processing.
+
+    BEGIN IMMEDIATE (same pattern as claim() below) makes the whole
+    check-then-set atomic across every process that runs its own copy
+    of the tick thread (uWSGI/Celery/beat/daphne) - Section 9's "never
+    concurrent" guarantee has to hold across processes sharing this one
+    state.db, not just within a single one.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = (now - min_retry_age).isoformat()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT idx, start_utc, duration_minutes, retry_count "
+                    "FROM segments "
+                    "WHERE recording_id = ? AND status = 'pending' "
+                    "AND (retry_count = 0 OR updated_at <= ?) "
+                    "AND NOT EXISTS ("
+                    "  SELECT 1 FROM segments s2 WHERE s2.recording_id = segments.recording_id "
+                    "  AND s2.status = 'in_progress'"
+                    ") "
+                    "ORDER BY idx LIMIT 1",
+                    (recording_id, cutoff),
+                ).fetchone()
+                if not row:
+                    conn.execute("ROLLBACK")
+                    return None
+                idx = row[0]
+                conn.execute(
+                    "UPDATE segments SET status = 'in_progress', updated_at = ? "
+                    "WHERE recording_id = ? AND idx = ?",
+                    (now.isoformat(), recording_id, idx),
+                )
+                conn.execute("COMMIT")
+                return {
+                    "idx": idx,
+                    "start_utc": row[1],
+                    "duration_minutes": row[2],
+                    "retry_count": row[3],
+                }
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+        finally:
+            conn.close()
+
+
+def mark_segment_completed(recording_id, idx, file_path):
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE segments SET status = 'completed', file_path = ?, "
+                "updated_at = ? WHERE recording_id = ? AND idx = ?",
+                (file_path, now, recording_id, idx),
+            )
+        finally:
+            conn.close()
+
+
+def record_segment_attempt_failure(recording_id, idx, error, retry_count):
+    """A real fetch attempt failed (both dialects, Section 8) - back to
+    'pending' per Section 9's no-dead-end-state rule, with retry_count
+    bumped and last_error recorded. The caller (tick.py) decides whether
+    this retry_count has hit the cap and, if so, marks the whole *job*
+    failed - the segment itself has no separate terminal state.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE segments SET status = 'pending', retry_count = ?, "
+                "last_error = ?, updated_at = ? WHERE recording_id = ? AND idx = ?",
+                (retry_count, error, now, recording_id, idx),
+            )
+        finally:
+            conn.close()
+
+
+def reset_segment_to_pending(recording_id, idx):
+    """Orphan recovery only (Section 9) - a segment found in_progress at
+    the start of a new tick, with no completed file on disk (checked by
+    the caller first), can only be a leftover from a crash/restart, not a
+    real fetch failure - so this deliberately does not touch retry_count
+    or last_error the way record_segment_attempt_failure does.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        conn = _connect()
+        try:
+            conn.execute(
+                "UPDATE segments SET status = 'pending', updated_at = ? "
+                "WHERE recording_id = ? AND idx = ?",
+                (now, recording_id, idx),
+            )
+        finally:
+            conn.close()
+
+
+def in_progress_segments():
+    """Every segment currently in_progress, across every job - the
+    candidate set for Section 9's orphan recovery at the start of a tick.
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT recording_id, idx FROM segments WHERE status = 'in_progress'"
+            ).fetchall()
+            return [{"recording_id": r[0], "idx": r[1]} for r in rows]
         finally:
             conn.close()
 

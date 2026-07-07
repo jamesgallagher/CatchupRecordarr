@@ -48,7 +48,7 @@ may describe intent that shifts slightly once real code is written.
 
 ---
 
-## Current Status Snapshot (updated 2026-07-07, end of Session 42)
+## Current Status Snapshot (updated 2026-07-07, end of Session 43)
 
 **For picking this up on a different machine.** The Session Log below has
 the full history; this block is just the fast-orientation version.
@@ -70,20 +70,37 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.17.4**, pushed and tag-verified reachable.
+- Current version: **v0.18.0**, pushed and tag-verified reachable.
 - **`tick.py`'s `GRACE_PERIOD` is temporarily 5 minutes, not the real
   15-minute default** — a deliberate, flagged debug-speed change
   (Session 40), not a design decision. Revert to `timedelta(minutes=15)`
   once the real live→timeshift archive lag is known, or once step 11/12
-  debugging wraps up, whichever comes first.
+  debugging wraps up, whichever comes first. **Not the same constant as**
+  `tick.SEGMENT_RETRY_BACKOFF` (15 min, independent, added Session 43 —
+  see below) — the two were deliberately decoupled.
+- **Important operational note for whoever updates to v0.18.0:** as of
+  this version, segment fetching is fully **automatic** — the background
+  tick claims and fetches pending segments on its own every 60s, no
+  manual action needed. Recording 33's job (still open pending the
+  TiViMate cross-check, Session 42) will start being retried
+  automatically once this version is running, up to 5 attempts spaced
+  15 minutes apart (`MAX_SEGMENT_ATTEMPTS`/`SEGMENT_RETRY_BACKOFF`,
+  Section 9) — i.e. up to ~75 minutes before it would be marked
+  permanently failed on its own. This is a genuinely new behavior change
+  worth being aware of before updating: previously nothing happened
+  without a manual click.
 
-**Build progress:** steps 1–10 of Section 15's build plan are done; step
-11 (single-segment fetch) is functionally built and *has* successfully
-proven the fetch mechanism end-to-end against the user's real provider,
-but the most recent real test 404s (see below) — step 11 isn't fully
-closed out until that's understood. Steps 12–20 haven't started. Mirror
-this in the task list (`TaskCreate`/`TaskUpdate`) when resuming — task
-#11 should stay `in_progress` until the 404 investigation resolves.
+**Build progress:** steps 1–12 of Section 15's build plan are built.
+Step 11 (single-segment fetch) proved the fetch mechanism end-to-end
+against the user's real provider; the open question of *why* real
+fetches keep returning 0 bytes/erroring (provider outage vs. genuine
+archive-finalization lag) is not a step 11 code defect — see the
+Sessions 37–42 entries below, still unresolved pending a clean
+TiViMate-confirmed retest. Step 12 (segment state machine, retry cap,
+orphan recovery) built and pushed this session (v0.18.0) — not yet
+verified end-to-end on the real deployment (automatic fetching wasn't
+live before this version). Steps 13–20 haven't started. Mirror this in
+the task list (`TaskCreate`/`TaskUpdate`) when resuming.
 
 **Resolved, Session 39: a stale-job crash, distinct from the outage
 investigation below.** Retesting "Fetch One Pending Segment Now" hit
@@ -817,21 +834,23 @@ hardcoded constant exactly rather than inventing our own number. Not
 exposed as a user setting for now — revisit only if real-world testing
 shows a provider needs a different cutoff.
 
-**Refinement candidate, Session 38 (Mustarrd comparison, not yet built):**
-a second reference implementation (github.com/razzamatazm/mustarrd, a
-standalone catchup-DVR app — read its actual source, not just docs) has
-no byte-size threshold at all; instead it sniffs the response's
-`Content-Type` and treats `text/*`/`application/json`/`application/xml`
-as "provider returned an error page" before ever reading the body
-(`download_manager.py:1806-1816` in their source), plus a separate
-zero-byte check after a completed transfer. This is a cheap, fast-fail
-signal our 1MB check doesn't give us — a wrong-format error page is
-caught immediately rather than after downloading up to 1MB of it. Worth
-adding as a second, faster check *alongside* (not instead of) the 1MB
-threshold when step 12/the fetch path is next touched — genuinely
-additive, not a replacement, since a tiny-but-correctly-typed response
-(the "archive not ready" case Sportarr's own comment describes) would
-still need the size check to catch it.
+**Refinement candidate, Session 38 (Mustarrd comparison) — built,
+Session 43:** a second reference implementation
+(github.com/razzamatazm/mustarrd, a standalone catchup-DVR app — read
+its actual source, not just docs) has no byte-size threshold at all;
+instead it sniffs the response's `Content-Type` and treats
+`text/*`/`application/json`/`application/xml` as "provider returned an
+error page" before ever reading the body (`download_manager.py:1806-1816`
+in their source), plus a separate zero-byte check after a completed
+transfer. This is a cheap, fast-fail signal our 1MB check doesn't give
+us — a wrong-format error page is caught immediately rather than after
+downloading up to 1MB of it. Added as a second, faster check *alongside*
+(not instead of) the 1MB threshold — genuinely additive, not a
+replacement, since a tiny-but-correctly-typed response (the "archive not
+ready" case Sportarr's own comment describes) still needs the size check
+to catch it. `download.py`'s `_download()` now checks
+`Content-Type` immediately after headers arrive, before opening the
+destination file at all.
 
 **Built, Session 34 (step 11):** `download.py`'s `fetch_segment()` — the
 actual HTTP fetch, streamed to a `.part` file with an atomic rename on
@@ -894,7 +913,7 @@ XC account for real and reports the resolved timezone per account.
 
 ---
 
-## Section 9 — Segmented Download `[~] DECIDED (design only)`
+## Section 9 — Segmented Download `[x] BUILT (through step 12; stitching, step 13, not yet built)`
 
 **Segmenting:** a program is split into fixed-size chunks (e.g. 15 or 30
 min), fetched **sequentially, one at a time** — never concurrently (see
@@ -929,24 +948,45 @@ from the native precedent, not just a labeling nitpick.
 **Segment state machine** (stored in Section 6's SQLite):
 `pending → in_progress → completed`, or on failure, **`in_progress → pending`**
 (not a dead-end `failed` state) — so the same "claim next unclaimed
-segment" logic naturally retries it on the next pass.
+segment" logic naturally retries it on the next pass. **Built, Session 43
+(step 12, v0.18.0):** `state.py`'s `claim_next_pending_segment()` (atomic
+`BEGIN IMMEDIATE` claim, same pattern as the scheduler's `claim()` —
+needed because every process running its own copy of the tick thread
+shares one `state.db`, so "never concurrent" has to hold across
+processes, not just within one), `mark_segment_completed()`,
+`record_segment_attempt_failure()`; orchestration
+(`tick._process_segments()`/`_fetch_claimed_segment()`) wired into the
+existing tick thread rather than a new scheduler.
 
 **Per-segment retry cap (resolved, Session 9): 5 attempts, hardcoded.**
 No direct Sportarr precedent here — its `MaxAttemptsPerChannel = 4` is a
 whole-job cap (it doesn't segment), a different granularity that doesn't
 port directly. A segment failure only counts once *both* dialects have
-failed (Section 8 — the dialect swap itself is free). No separate backoff
-timer needed on top of the cap: the existing 5-15 min poll cadence
-(Section 5) already spaces retries out naturally, so an explicit backoff
-would be redundant. At that cadence, 5 attempts is roughly 25-75 minutes
-of retrying — enough to survive a transient provider blip, not enough to
-silently grind for hours on one bad chunk. Hardcoded rather than a plugin
+failed (Section 8 — the dialect swap itself is free). ~~No separate
+backoff timer needed on top of the cap: the existing 5-15 min poll
+cadence (Section 5) already spaces retries out naturally, so an explicit
+backoff would be redundant.~~ **Corrected building step 12, Session 43:**
+this assumption didn't match what actually got built — the tick runs
+every **60 seconds**, not every 5-15 minutes (that cadence was Sportarr's,
+never this project's), so without an explicit backoff the cap would
+exhaust itself in 5 *minutes*, not the intended 25-75. This only surfaced
+now because Sessions 40-42's real-world testing had just shown the
+provider can genuinely take 20-30+ minutes to finalize a window — with
+the original no-backoff assumption, recording 33's job would likely have
+been auto-marked permanently failed before that finished. Fixed:
+`tick.SEGMENT_RETRY_BACKOFF` (15 min, deliberately its own constant, not
+tied to the currently-shortened debug `GRACE_PERIOD`) gates a retry via
+each segment's own `updated_at` — a never-attempted segment claims
+immediately (the job-level grace period already did the "don't rush the
+archive" wait once), a previously-failed one waits out the backoff first.
+5 attempts × 15 min backoff = 75 minutes total, landing back inside the
+originally-intended 25-75 minute range. Hardcoded rather than a plugin
 setting, matching Section 8's "not ready" threshold precedent — add
 configuration surface only if real-world testing against a provider shows
 it's needed, not pre-emptively. When the cap is hit, mark the *whole job*
 failed with a specific reason (e.g. "segment 4 of 9 failed after 5
 attempts: `<last error>`"), rather than waiting on the retention-based
-cutoff (Section 10) to eventually notice.
+cutoff (Section 10) to eventually notice — **built as designed, Session 43.**
 
 **Turbo mode (concurrent segment downloads) — considered and rejected for
 v1.** Discussed in depth and deliberately dropped, not just deferred for
@@ -1009,10 +1049,12 @@ of each periodic tick, before claiming new work, reset any segment found
 `in_progress` back to `pending`. Deliberately not a separate mechanism
 from the job-level one — same idea, applied at both granularities,
 instead of two different recovery strategies doing the same job.
+**Built, Session 43 (step 12, v0.18.0):** `tick._recover_orphaned_segments()`,
+via `state.in_progress_segments()`/`reset_segment_to_pending()`.
 
-**Refinement candidate, Session 38 (Mustarrd comparison, not yet built):**
-before blindly resetting an orphaned `in_progress` segment to `pending`
-(and re-fetching it from scratch) in step 12, check whether its file
+**Refinement candidate, Session 38 (Mustarrd comparison) — built,
+Session 43:** before blindly resetting an orphaned `in_progress` segment
+to `pending` (and re-fetching it from scratch), check whether its file
 already exists on disk at the expected size — Mustarrd's own startup
 recovery (`recover_incomplete_downloads()`, `download_manager.py:507+`)
 does exactly this for its (unsegmented) downloads: compares
@@ -1029,7 +1071,10 @@ crash and skip re-fetching only those," which is cheap and safe to add
 given each segment already has its own tracked file path (Section 6).
 Our segmented design already has a structural edge here Mustarrd's
 whole-file model lacks: a crash only ever needs to redo whichever
-segment was in flight, never the whole job.
+segment was in flight, never the whole job — and unlike Mustarrd, no
+byte-count bookkeeping was even needed to implement this: `download.py`'s
+existing atomic `.part`-then-rename means the final file path only ever
+exists once a fetch fully completed, so plain existence *is* the proof.
 
 **Job-level orphan recovery, new case found in practice (Session 39):
 the Recording itself can disappear, not just the fetch stalling.** The
@@ -1517,9 +1562,12 @@ each step names the design section(s) it implements.
 10. Segment planning: split a job's window into fixed-size chunks.
 11. Single-segment fetch using steps 7-9's URL/dialect logic, plus the
     1MB "not ready" threshold check (Section 8).
-12. Segment state machine: `pending → in_progress → completed`/`pending`,
-    5-attempt retry cap, orphan recovery (reset `in_progress` at tick
-    start, Section 9).
+12. **Built, Session 43 (v0.18.0):** Segment state machine:
+    `pending → in_progress → completed`/`pending`, 5-attempt retry cap,
+    orphan recovery (reset `in_progress` at tick start, Section 9) with
+    the Session 38 disk-existence refinement, plus a Content-Type sniff
+    alongside the 1MB threshold. See Section 9 for the retry-backoff
+    fix this step required in practice.
 13. Stitching: concatenate completed segments into the final MKV.
 
 **Phase G — Validation (Section 10)**
@@ -2548,3 +2596,50 @@ diverges from the sections above.)*
   guess. Also still outstanding from Session 41: confirming via "List
   Catchup Channels" whether the original stuck recording's channel (and
   "NZ SKY Sport SELECT") are simply non-catchup-capable.
+
+- **Session 43** (2026-07-07) - At the user's request to push straight
+  through the remaining build plan rather than pause on the open
+  provider question (which doesn't block anything below it), built step
+  12 in full: segment state machine, 5-attempt retry cap, and orphan
+  recovery (Section 9), plus both Mustarrd-derived refinements from
+  Session 38 (Content-Type sniff in `download.py`, disk-existence check
+  before resetting an orphaned segment in `tick.py`). New `state.py`
+  functions: `claim_next_pending_segment()` (atomic `BEGIN IMMEDIATE`,
+  same pattern as the existing scheduler `claim()` - needed since every
+  process running its own tick thread shares one `state.db`, so "never
+  concurrent" has to hold across processes), `mark_segment_completed()`,
+  `record_segment_attempt_failure()`, `reset_segment_to_pending()`,
+  `in_progress_segments()`, `get_job()`/`set_job_status()`,
+  `delete_job()`'s counterpart-in-spirit `failed_jobs()` (so a job
+  hitting the retry cap doesn't just silently vanish from every list
+  action - Section 14's observability philosophy applied to terminal
+  failures, not just in-flight state). New orchestration in `tick.py`:
+  `_recover_orphaned_segments()`, `_process_segments()`,
+  `_fetch_claimed_segment()`, `_fail_segment_and_maybe_job()`, all wired
+  into the existing 60s tick loop rather than a new scheduler.
+  **A real design bug found and fixed while building this, not just a
+  refinement:** Section 9's original "no separate backoff timer needed"
+  reasoning assumed a 5-15 minute poll cadence that was never actually
+  built - the real tick runs every 60 *seconds* - so the 5-attempt cap
+  would have exhausted itself in 5 minutes against a provider that
+  Sessions 40-42 just showed can genuinely need 20-30+ minutes. Fixed
+  with a new, deliberately-independent `SEGMENT_RETRY_BACKOFF` (15 min)
+  constant, not tied to the currently-shortened debug `GRACE_PERIOD` -
+  5 attempts x 15 min = 75 min total retry window, matching Section 9's
+  originally-intended 25-75 minute range. Also refactored the manual
+  "Fetch One Pending Segment Now" action to call the exact same
+  `tick.fetch_one_segment_now()` path the automatic tick uses, rather
+  than keep its own separate ad-hoc implementation that never persisted
+  a result - two diverging "fetch a segment" code paths would have been
+  able to race each other's claims. Bumped to v0.18.0, pushed,
+  tag-verified reachable. **Important operational consequence, flagged
+  in the Snapshot above:** fetching is now fully automatic - recording
+  33's still-open job (Session 42's TiViMate cross-check) will start
+  being retried on its own once this version is running, up to ~75
+  minutes before a possible auto-fail, which the user should be aware of
+  before updating. Not yet verified end-to-end on the real deployment.
+  **Next:** user updates to v0.18.0 and watches recording 33 (and
+  whatever else is pending) get real automatic fetch attempts in the
+  logs; once that's confirmed working mechanically (regardless of
+  whether the provider itself is ready yet), continue to step 13
+  (stitching completed segments into a final MKV).
