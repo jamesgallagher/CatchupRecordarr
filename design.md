@@ -70,7 +70,7 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.22.0**, pushed and tag-verified reachable.
+- Current version: **v0.23.0**, pushed and tag-verified reachable.
 - **`tick.py`'s `GRACE_PERIOD` is temporarily 5 minutes, not the real
   15-minute default** — a deliberate, flagged debug-speed change
   (Session 40), not a design decision. Revert to `timedelta(minutes=15)`
@@ -664,7 +664,7 @@ logic wired to it yet, per the build plan.
 
 ---
 
-## Section 7 — Recording Integration (Native Playback + Comskip) `[x] BUILT (Recording-row update, step 16; comskip gating is step 17, not yet built)`
+## Section 7 — Recording Integration (Native Playback + Comskip) `[x] BUILT`
 
 **Updated, Session 6:** the plugin no longer *creates* a new `Recording`
 row — per Section 4/5's revised design, a native `Recording` row already
@@ -714,6 +714,22 @@ the same Celery task the native pipeline calls, unmodified — only when
 2. The plugin's own `comskip_enabled_default` setting (Section 4) is True
    — or the channel's optional `custom_properties["catchup_recordarr"]["comskip_enabled"]`
    override, if one is ever set, takes precedence over the default.
+
+**Built, Session 43 (step 17, v0.23.0):** `recording.py`'s
+`maybe_queue_comskip()` — the two-part gate above, wired into `tick.py`
+right after the Recording row is marked completed (step 16).
+**`comskip_enabled_default` is hardcoded `False` for now, not yet a real
+setting** — same "hardcode until a setting is actually needed"
+discipline this project has used for every other constant (Section 8/9);
+step 18 will expose it as a configurable `Plugin` field. **The
+per-channel override is deliberately not implemented** — unlike every
+other `custom_properties` reference in this codebase (`Stream`,
+`Recording`), it was never actually confirmed against Dispatcharr's real
+`Channel` model whether it even has a `custom_properties` field to hold
+this marker; this design section itself flagged it as speculative
+("kept as an easy follow-up, not designed further") rather than
+verified, so it's flagged here again rather than guessed at in code.
+Verify against source before building it.
 
 Chosen deliberately over letting the plugin's flag act alone: if an
 operator has turned comskip off system-wide (not installed, or a
@@ -1639,8 +1655,9 @@ each step names the design section(s) it implements.
     row in place on success: `custom_properties` shape, `"[Catchup] "`
     title prefix, merge (not overwrite) to preserve existing markers
     (#14). See Section 7.
-17. Comskip gating: global `CoreSettings` switch AND plugin's
-    `comskip_enabled_default` setting.
+17. **Built, Session 43 (v0.23.0):** Comskip gating: global `CoreSettings`
+    switch AND plugin's `comskip_enabled_default` setting (hardcoded for
+    now - step 18 exposes it as a real field). See Section 7.
 
 **Phase I — Polish**
 18. Plugin settings fields: `comskip_enabled_default`, grace period,
@@ -2761,13 +2778,27 @@ diverges from the sections above.)*
   critical ordering rule exactly (this is the only call site). Our own
   internal job status finally reaches a genuinely terminal `'completed'`
   - reserved in the schema since step 3, unused until now. Bumped to
-  v0.22.0, pushed, tag-verified reachable. Not yet verified against a
-  real recording (same blocker as steps 13-15).
-  **Next:** user updates to v0.22.0. Once steps 11/12 are confirmed
+  v0.22.0. Not yet verified against a real recording (same blocker as
+  steps 13-15). Continued to step 17: `recording.py`'s new
+  `maybe_queue_comskip()` - the two-part gate Section 7 specifies
+  (global `CoreSettings.get_dvr_comskip_enabled()` AND the plugin's own
+  setting), wired in right after the Recording row is marked completed.
+  `comskip_enabled_default` is a hardcoded `False` constant for now, not
+  a real setting yet (step 18's job). **Deliberately did not implement
+  the per-channel comskip override** the design text mentions
+  (`custom_properties["catchup_recordarr"]["comskip_enabled"]` on
+  `Channel`) - unlike every other `custom_properties` reference in this
+  codebase, it was never actually confirmed against Dispatcharr's real
+  source whether `Channel` even has that field; the design section
+  itself already flagged this as speculative ("not designed further"),
+  so it's flagged again here rather than guessed at in code - a wrong
+  guess would either crash or silently no-op. Bumped to v0.23.0, pushed,
+  tag-verified reachable.
+  **Next:** user updates to v0.23.0. Once steps 11/12 are confirmed
   working against a real available archive window (Sessions 37-42's open
   question), watch a job flow all the way through
   `stitched -> validated -> completed` and actually appear as a playable,
   `"[Catchup] "`-tagged recording in Dispatcharr's own UI - the first
-  true end-to-end milestone. Otherwise continuing to step 17 (comskip
-  gating) regardless, per the same instruction to keep building through
-  what doesn't depend on that answer.
+  true end-to-end milestone. Otherwise continuing to step 18 (plugin
+  settings fields) regardless, per the same instruction to keep building
+  through what doesn't depend on that answer.

@@ -37,7 +37,7 @@ from .archive import catchup_capable_stream_for_channel, channel_archive_retenti
 from .download import fetch_segment
 from .planning import SEGMENT_MINUTES, plan_segments
 from .provider import resolve_provider_timezone
-from .recording import mark_recording_completed
+from .recording import mark_recording_completed, maybe_queue_comskip
 from .stitch import stitch_segments
 from .validate import validate_output
 
@@ -417,6 +417,11 @@ def _stitch_job(rid):
     # reserved in the schema back in step 3.
     mark_recording_completed(rec, output_path)
     state.set_job_status(rid, "completed")
+
+    # Step 17 - same gate native live capture uses (global CoreSettings
+    # switch) AND the plugin's own comskip_enabled_default, never the
+    # plugin flag acting alone (Section 7).
+    maybe_queue_comskip(rec)
 
 
 def _process_segments():

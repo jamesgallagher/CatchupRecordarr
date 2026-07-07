@@ -20,6 +20,9 @@ import os
 
 from django.utils import timezone
 
+from apps.channels.tasks import comskip_process_recording
+from core.models import CoreSettings
+
 from ._version import LOG_TAG
 
 logger = logging.getLogger(__name__)
@@ -75,3 +78,42 @@ def mark_recording_completed(rec, output_path):
         "%s recording %s: Recording row updated to completed - %s (%d bytes)",
         LOG_TAG, rec.id, output_path, cp["bytes_written"],
     )
+
+
+# Section 4 - moved from a per-channel flag to a single plugin-wide
+# setting once the original channel-curation/flagging mechanism was
+# dropped (Session 6). Hardcoded default for step 17 - step 18 exposes
+# this as a real configurable Plugin field; same "hardcode until a
+# setting is actually needed" discipline used throughout this project
+# for every other constant (Section 8/9). Default OFF, matching Section
+# 4's opt-in-by-default philosophy.
+COMSKIP_ENABLED_DEFAULT = False
+
+
+def maybe_queue_comskip(rec):
+    """Queue the native comskip_process_recording task - unmodified, the
+    same Celery task the live-capture pipeline calls - only when BOTH the
+    existing global Dispatcharr DVR-comskip switch and this plugin's own
+    setting are true (Section 7). Deliberately not letting the plugin's
+    own flag act alone: overriding an operator's system-wide comskip-off
+    choice would be a surprising override of stated intent.
+
+    Section 7 also specifies an optional per-channel override
+    (`custom_properties["catchup_recordarr"]["comskip_enabled"]`) that
+    would take precedence over the plugin-wide default below - not
+    implemented here. Unlike every other custom_properties reference in
+    this codebase (Stream, Recording), it was never actually confirmed
+    against Dispatcharr's source whether Channel even has a
+    custom_properties field to hold it - the design doc itself flags
+    this as speculative ("kept as an easy follow-up, not designed
+    further"). Flagged rather than guessed at - verify against
+    Dispatcharr's real Channel model before building this, don't assume
+    a field exists.
+    """
+    if not CoreSettings.get_dvr_comskip_enabled():
+        return
+    if not COMSKIP_ENABLED_DEFAULT:
+        return
+
+    comskip_process_recording.delay(rec.id)
+    logger.info("%s recording %s: queued for comskip processing", LOG_TAG, rec.id)
