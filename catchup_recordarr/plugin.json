@@ -1,10 +1,34 @@
 {
     "name": "Catchup Recordarr",
-    "version": "0.23.0",
+    "version": "0.24.0",
     "description": "Detects catchup/timeshift-capable channels and fulfills scheduled recordings from the provider's archive instead of live capture.",
     "author": "James",
     "help_url": "https://github.com/jamesgallagher/CatchupRecordarr",
-    "fields": [],
+    "fields": [
+        {
+            "id": "comskip_enabled_default",
+            "label": "Run comskip on catchup recordings",
+            "type": "boolean",
+            "default": false,
+            "help_text": "Also requires Dispatcharr's own global DVR comskip setting (Settings -> DVR) to be enabled - this plugin never overrides that system-wide switch on its own, only adds an extra gate on top of it (Section 7)."
+        },
+        {
+            "id": "grace_period_minutes",
+            "label": "Post-air grace period (minutes)",
+            "type": "number",
+            "default": 15,
+            "min": 1,
+            "help_text": "How long after a recording's scheduled end time to wait before treating its catchup window as ready to fetch - gives the provider's archive time to finalize the broadcast (Section 5)."
+        },
+        {
+            "id": "segment_retry_backoff_minutes",
+            "label": "Segment retry backoff (minutes)",
+            "type": "number",
+            "default": 15,
+            "min": 1,
+            "help_text": "Minimum time between retry attempts on a failed segment fetch (5 attempts total, hardcoded) - spaces retries out so the cap doesn't exhaust itself before a slow provider finishes archiving the window (Section 9)."
+        }
+    ],
     "actions": [
         {
             "id": "ping",

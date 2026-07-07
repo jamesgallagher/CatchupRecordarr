@@ -38,6 +38,7 @@ from .download import fetch_segment
 from .planning import SEGMENT_MINUTES, plan_segments
 from .provider import resolve_provider_timezone
 from .recording import mark_recording_completed, maybe_queue_comskip
+from .settings import get_int_setting
 from .stitch import stitch_segments
 from .validate import validate_output
 
@@ -51,16 +52,30 @@ INTERRUPTED_REASON = (
     "airs, instead of capturing it live."
 )
 
-# Sportarr-matching default (Section 5) - buffer after end_time before
-# treating a window as ready, since the provider's archive needs time to
-# finalize the tail of the broadcast. Hardcoded for now, same reasoning
-# as Section 8's "not ready" threshold: add a setting only if real-world
-# testing shows it needs tuning.
-#
-# TEMPORARILY 5 minutes (Session 40) for faster iteration while debugging
-# step 11/12 - real value is 15 minutes, revert once the live->timeshift
-# lag is actually known. See design.md Session 40.
-GRACE_PERIOD = timedelta(minutes=5)
+# Real designed defaults (15 min each) - both now live plugin settings
+# (step 18) rather than hardcoded constants, read fresh via
+# settings.get_int_setting() at each point of use so a change in
+# Settings -> Plugins takes effect on the next tick, no restart needed.
+# This is also what organically resolves Session 40's temporary 5-minute
+# debug override of the grace period: that was only ever a code-level
+# hack for faster iteration before this setting existed, revertable by
+# the user directly in the UI now instead of needing another version
+# bump - the code's own default reverts to the real designed value (15).
+DEFAULT_GRACE_PERIOD_MINUTES = 15
+DEFAULT_SEGMENT_RETRY_BACKOFF_MINUTES = 15
+
+
+def _grace_period():
+    return timedelta(minutes=get_int_setting("grace_period_minutes", DEFAULT_GRACE_PERIOD_MINUTES))
+
+
+def _segment_retry_backoff():
+    return timedelta(
+        minutes=get_int_setting(
+            "segment_retry_backoff_minutes", DEFAULT_SEGMENT_RETRY_BACKOFF_MINUTES
+        )
+    )
+
 
 # Section 9 - hardcoded, 5 attempts, no separate backoff timer was the
 # original reasoning ("the existing 5-15 min poll cadence already spaces
@@ -68,16 +83,14 @@ GRACE_PERIOD = timedelta(minutes=5)
 # built: the tick runs every 60 seconds, not every 5-15 minutes, so
 # without an explicit backoff the cap would exhaust itself in 5 *minutes*
 # against a provider that (per Sessions 40-42's real-world testing) can
-# genuinely take 20-30+ minutes to finalize a window. SEGMENT_RETRY_BACKOFF
-# below fixes that gap - deliberately its own constant, not tied to
-# GRACE_PERIOD above, since GRACE_PERIOD is currently an intentionally-
-# shortened debug value (Session 40) and this retry spacing needs a safer,
-# more conservative number until the real provider lag is known. At 15
-# minutes x 5 attempts, a job gets up to 75 minutes of retrying before its
-# segment is marked permanently failed - matching Section 9's originally
-# intended "25-75 minutes" range.
+# genuinely take 20-30+ minutes to finalize a window. The backoff above
+# fixes that gap. At 15 minutes x 5 attempts, a job gets up to 75 minutes
+# of retrying before its segment is marked permanently failed - matching
+# Section 9's originally intended "25-75 minutes" range. Retry *count*
+# itself stays hardcoded (not exposed as a setting) - unlike the timing
+# constants above, nothing so far has suggested the count itself needs
+# tuning, only how long to wait between attempts.
 MAX_SEGMENT_ATTEMPTS = 5
-SEGMENT_RETRY_BACKOFF = timedelta(minutes=15)
 
 _tick_started = False
 _tick_lock = threading.Lock()
@@ -152,7 +165,7 @@ def _check_post_air_ready():
 
     candidates = Recording.objects.filter(
         id__in=recording_ids,
-        end_time__lte=now - GRACE_PERIOD,
+        end_time__lte=now - _grace_period(),
     ).select_related("channel")
 
     for rec in candidates:
@@ -285,7 +298,7 @@ def _fail_segment_and_maybe_job(rid, segment, error):
             "%s recording %s segment #%s: attempt %d/%d failed (%s), will "
             "retry no sooner than %s from now",
             LOG_TAG, rid, segment["idx"], retry_count, MAX_SEGMENT_ATTEMPTS,
-            error, SEGMENT_RETRY_BACKOFF,
+            error, _segment_retry_backoff(),
         )
 
 
@@ -435,7 +448,7 @@ def _process_segments():
     NOT EXISTS check inside that claim, a given job) at a time.
     """
     for rid in state.non_terminal_job_recording_ids():
-        segment = state.claim_next_pending_segment(rid, SEGMENT_RETRY_BACKOFF)
+        segment = state.claim_next_pending_segment(rid, _segment_retry_backoff())
         if segment is not None:
             _fetch_claimed_segment(rid, segment)
 
@@ -451,7 +464,7 @@ def fetch_one_segment_now():
     """
     _reap_orphaned_jobs()
     for rid in state.non_terminal_job_recording_ids():
-        segment = state.claim_next_pending_segment(rid, SEGMENT_RETRY_BACKOFF)
+        segment = state.claim_next_pending_segment(rid, _segment_retry_backoff())
         if segment is None:
             continue
         _fetch_claimed_segment(rid, segment)

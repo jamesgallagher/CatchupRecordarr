@@ -24,6 +24,7 @@ from apps.channels.tasks import comskip_process_recording
 from core.models import CoreSettings
 
 from ._version import LOG_TAG
+from .settings import get_bool_setting
 
 logger = logging.getLogger(__name__)
 
@@ -80,16 +81,6 @@ def mark_recording_completed(rec, output_path):
     )
 
 
-# Section 4 - moved from a per-channel flag to a single plugin-wide
-# setting once the original channel-curation/flagging mechanism was
-# dropped (Session 6). Hardcoded default for step 17 - step 18 exposes
-# this as a real configurable Plugin field; same "hardcode until a
-# setting is actually needed" discipline used throughout this project
-# for every other constant (Section 8/9). Default OFF, matching Section
-# 4's opt-in-by-default philosophy.
-COMSKIP_ENABLED_DEFAULT = False
-
-
 def maybe_queue_comskip(rec):
     """Queue the native comskip_process_recording task - unmodified, the
     same Celery task the live-capture pipeline calls - only when BOTH the
@@ -100,8 +91,8 @@ def maybe_queue_comskip(rec):
 
     Section 7 also specifies an optional per-channel override
     (`custom_properties["catchup_recordarr"]["comskip_enabled"]`) that
-    would take precedence over the plugin-wide default below - not
-    implemented here. Unlike every other custom_properties reference in
+    would take precedence over the `comskip_enabled_default` setting -
+    not implemented here. Unlike every other custom_properties reference in
     this codebase (Stream, Recording), it was never actually confirmed
     against Dispatcharr's source whether Channel even has a
     custom_properties field to hold it - the design doc itself flags
@@ -112,7 +103,7 @@ def maybe_queue_comskip(rec):
     """
     if not CoreSettings.get_dvr_comskip_enabled():
         return
-    if not COMSKIP_ENABLED_DEFAULT:
+    if not get_bool_setting("comskip_enabled_default", False):
         return
 
     comskip_process_recording.delay(rec.id)

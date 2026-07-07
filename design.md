@@ -70,14 +70,19 @@ the full history; this block is just the fast-orientation version.
   `url` fields point at GitHub's tag-archive zips. Always verify the
   zip actually resolves after tagging (`curl -sI -L ... -w "%{http_code}"`
   against the tag's archive URL) before telling the user to update.
-- Current version: **v0.23.0**, pushed and tag-verified reachable.
-- **`tick.py`'s `GRACE_PERIOD` is temporarily 5 minutes, not the real
-  15-minute default** — a deliberate, flagged debug-speed change
-  (Session 40), not a design decision. Revert to `timedelta(minutes=15)`
-  once the real live→timeshift archive lag is known, or once step 11/12
-  debugging wraps up, whichever comes first. **Not the same constant as**
-  `tick.SEGMENT_RETRY_BACKOFF` (15 min, independent, added Session 43 —
-  see below) — the two were deliberately decoupled.
+- Current version: **v0.24.0**, pushed and tag-verified reachable.
+- **Resolved, Session 43 (step 18): both are now real, independent
+  settings, not hardcoded constants.** `grace_period_minutes` and
+  `segment_retry_backoff_minutes` are configurable `Plugin.fields`
+  (Settings → Plugins → this plugin), read fresh from `PluginConfig.settings`
+  on every tick via `settings.get_int_setting()` — no code change or
+  version bump needed to adjust either one anymore. Both default to the
+  real designed value, **15 minutes** — this organically resolves
+  Session 40's temporary 5-minute debug override of the grace period
+  (that was only ever a code-level hack for faster iteration before this
+  setting existed); the user can set it back to 5 directly in the UI if
+  still debugging, or leave it at the real default. Still two genuinely
+  independent knobs, not the same value duplicated.
 - **Important operational note for whoever updates to v0.18.0:** as of
   this version, segment fetching is fully **automatic** — the background
   tick claims and fetches pending segments on its own every 60s, no
@@ -548,9 +553,12 @@ one 60s-interval thread now does both checks each pass. Not a Celery
 on this deployment).
 
 Query: every non-terminal job (state store) whose `Recording.end_time` is
-at least `GRACE_PERIOD` (15 min, hardcoded — Sportarr-matching default,
-same "don't add a setting pre-emptively" reasoning as Section 8's "not
-ready" threshold) in the past. For each: if the window has already aged
+at least `GRACE_PERIOD` (15 min default — Sportarr-matching, originally
+hardcoded on the same "don't add a setting pre-emptively" reasoning as
+Section 8's "not ready" threshold; became a real configurable
+`grace_period_minutes` setting at step 18, Session 43, once real-world
+testing showed the right value genuinely wasn't knowable in advance) in
+the past. For each: if the window has already aged
 out of the channel's archive retention (`channel_archive_retention_days`,
 max across the channel's streams), log a warning once and skip — the
 actual retention-based permanent-failure handling is step 15, not built
@@ -573,7 +581,14 @@ candidates = Recording.objects.filter(
 
 - `grace_period` / `lookback_window`: unchanged in concept from the
   original design (Sportarr-matching ~10-15 min grace; lookback bounded by
-  `tv_archive_duration`).
+  `tv_archive_duration`). **Note, Session 43 (step 18):** as actually
+  built, there's no separate `lookback_window` pre-filter on the
+  candidates query - the same goal (don't keep processing a job that's
+  aged too far past usefulness) is instead achieved by step 15's
+  retention-based permanent-failure marking, which is arguably better
+  since it's keyed to each channel's real `tv_archive_duration` rather
+  than one hardcoded window. `grace_period` itself is real, though - now
+  a configurable setting (`grace_period_minutes`), not hardcoded.
 - Program metadata (`title`, `sub_title`, `description`) no longer needs a
   separate EPG lookup at all in the common case — it's already present in
   `Recording.custom_properties["program"]`, populated at creation time by
@@ -1006,19 +1021,23 @@ now because Sessions 40-42's real-world testing had just shown the
 provider can genuinely take 20-30+ minutes to finalize a window — with
 the original no-backoff assumption, recording 33's job would likely have
 been auto-marked permanently failed before that finished. Fixed:
-`tick.SEGMENT_RETRY_BACKOFF` (15 min, deliberately its own constant, not
-tied to the currently-shortened debug `GRACE_PERIOD`) gates a retry via
-each segment's own `updated_at` — a never-attempted segment claims
-immediately (the job-level grace period already did the "don't rush the
-archive" wait once), a previously-failed one waits out the backoff first.
-5 attempts × 15 min backoff = 75 minutes total, landing back inside the
-originally-intended 25-75 minute range. Hardcoded rather than a plugin
-setting, matching Section 8's "not ready" threshold precedent — add
-configuration surface only if real-world testing against a provider shows
-it's needed, not pre-emptively. When the cap is hit, mark the *whole job*
-failed with a specific reason (e.g. "segment 4 of 9 failed after 5
-attempts: `<last error>`"), rather than waiting on the retention-based
-cutoff (Section 10) to eventually notice — **built as designed, Session 43.**
+`tick._segment_retry_backoff()` (15 min default, deliberately independent
+from `_grace_period()` even though both currently default to the same
+value) gates a retry via each segment's own `updated_at` — a
+never-attempted segment claims immediately (the job-level grace period
+already did the "don't rush the archive" wait once), a previously-failed
+one waits out the backoff first. 5 attempts × 15 min backoff = 75 minutes
+total, landing back inside the originally-intended 25-75 minute range.
+**Updated, Session 43 (step 18):** the backoff *duration* became a real
+configurable setting (`segment_retry_backoff_minutes`) rather than
+staying hardcoded, once real-world testing (Sessions 40-42) showed the
+right value genuinely wasn't known yet — but the attempt *count* (5)
+stays hardcoded, matching Section 8's "not ready" threshold precedent,
+since nothing has suggested the count itself needs tuning, only the
+timing. When the cap is hit, mark the *whole job* failed with a specific
+reason (e.g. "segment 4 of 9 failed after 5 attempts: `<last error>`"),
+rather than waiting on the retention-based cutoff (Section 10) to
+eventually notice — **built as designed, Session 43.**
 
 **Turbo mode (concurrent segment downloads) — considered and rejected for
 v1.** Discussed in depth and deliberately dropped, not just deferred for
@@ -1656,12 +1675,18 @@ each step names the design section(s) it implements.
     title prefix, merge (not overwrite) to preserve existing markers
     (#14). See Section 7.
 17. **Built, Session 43 (v0.23.0):** Comskip gating: global `CoreSettings`
-    switch AND plugin's `comskip_enabled_default` setting (hardcoded for
-    now - step 18 exposes it as a real field). See Section 7.
+    switch AND plugin's `comskip_enabled_default` setting. See Section 7.
 
 **Phase I — Polish**
-18. Plugin settings fields: `comskip_enabled_default`, grace period,
-    lookback window, any others surfaced along the way.
+18. **Built, Session 43 (v0.24.0):** Plugin settings fields:
+    `comskip_enabled_default`, `grace_period_minutes`,
+    `segment_retry_backoff_minutes` - real, verified `Plugin.fields`
+    (schema confirmed against Dispatcharr's own `PluginFieldSerializer`
+    before writing this, not assumed), read back via a new `settings.py`
+    module. "Lookback window" (the original design text's third
+    candidate) turned out to already be superseded by step 15's
+    retention-based failure marking, which achieves the same goal a
+    different way - not built as a separate setting, see Section 5.
 19. Logging audit pass: confirm every step above actually followed
     Section 14's conventions (tags, structured context, no credentials
     logged) rather than assuming it did while focused on functionality.
@@ -2792,13 +2817,37 @@ diverges from the sections above.)*
   source whether `Channel` even has that field; the design section
   itself already flagged this as speculative ("not designed further"),
   so it's flagged again here rather than guessed at in code - a wrong
-  guess would either crash or silently no-op. Bumped to v0.23.0, pushed,
-  tag-verified reachable.
-  **Next:** user updates to v0.23.0. Once steps 11/12 are confirmed
-  working against a real available archive window (Sessions 37-42's open
-  question), watch a job flow all the way through
-  `stitched -> validated -> completed` and actually appear as a playable,
-  `"[Catchup] "`-tagged recording in Dispatcharr's own UI - the first
-  true end-to-end milestone. Otherwise continuing to step 18 (plugin
-  settings fields) regardless, per the same instruction to keep building
-  through what doesn't depend on that answer.
+  guess would either crash or silently no-op. Bumped to v0.23.0. Continued
+  to step 18: before writing any settings code, actually cloned
+  Dispatcharr's own repo (github.com/Dispatcharr/Dispatcharr, public) to
+  verify the real `Plugin.fields`/`PluginConfig.settings` contract rather
+  than guess at it - the exact discipline this project got burned by
+  skipping once before (Session 21/22's Celery registration failure).
+  Confirmed: `Plugin.fields` is validated against a real
+  `PluginFieldSerializer` (id/label/type/default/help_text/...);
+  `PluginConfig.settings` is an unvalidated `JSONField` keyed by field
+  id; and - the one genuinely important finding - `context["settings"]`
+  (the version with defaults merged in) is **only ever built for action
+  invocations** (`_build_context()`), never handed to a plugin's own
+  background threads. Since `plugin.py`'s scheduler and `tick.py`'s tick
+  both run independently of any action call, they'd never have received
+  that context anyway - a real gap a naive implementation would have hit.
+  New `settings.py` module reads `PluginConfig` directly instead, with
+  defensive int/bool coercion since the stored values aren't
+  schema-validated. Exposed three real fields:
+  `comskip_enabled_default` (replaces `recording.py`'s hardcoded
+  constant), `grace_period_minutes` and `segment_retry_backoff_minutes`
+  (both replace `tick.py`'s hardcoded constants, now read fresh per-tick
+  so a change takes effect without a restart). Centralized `PLUGIN_KEY`
+  into `_version.py` while touching this (previously duplicated in
+  `takeover.py`). Bumped to v0.24.0, pushed, tag-verified reachable.
+  **Next:** user updates to v0.24.0 and can now tune the grace period /
+  retry backoff directly in Settings → Plugins instead of needing a code
+  change. Once steps 11/12 are confirmed working against a real
+  available archive window (Sessions 37-42's open question), watch a
+  job flow all the way through `stitched -> validated -> completed` and
+  actually appear as a playable, `"[Catchup] "`-tagged recording in
+  Dispatcharr's own UI - the first true end-to-end milestone. Otherwise
+  continuing to step 19 (logging audit pass) regardless, per the same
+  instruction to keep building through what doesn't depend on that
+  answer.

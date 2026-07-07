@@ -19,7 +19,7 @@ from apps.channels.models import Recording
 from apps.channels.signals import revoke_task
 
 from . import state
-from ._version import LOG_TAG
+from ._version import LOG_TAG, PLUGIN_KEY
 from .archive import stream_is_catchup_capable
 
 logger = logging.getLogger(__name__)
@@ -28,8 +28,6 @@ logger = logging.getLogger(__name__)
 # re-import this module on a forced reload, and without a uid each import
 # would stack another live receiver.
 DISPATCH_UID = "catchup_recordarr_takeover"
-
-PLUGIN_KEY = "catchup_recordarr"
 
 
 def _plugin_enabled():

@@ -160,7 +160,53 @@ class Plugin:
     author = "James"
     help_url = "https://github.com/jamesgallagher/CatchupRecordarr"
 
-    fields = []
+    # Schema confirmed against Dispatcharr's actual PluginFieldSerializer
+    # (apps/plugins/serializers.py) before writing this, not assumed -
+    # id/label/type/default/help_text, type one of
+    # string/number/boolean/select/text/info. Values persist in
+    # PluginConfig.settings (settings.py reads them back for this
+    # plugin's own background threads, which never receive an action's
+    # context["settings"]).
+    fields = [
+        {
+            "id": "comskip_enabled_default",
+            "label": "Run comskip on catchup recordings",
+            "type": "boolean",
+            "default": False,
+            "help_text": (
+                "Also requires Dispatcharr's own global DVR comskip setting "
+                "(Settings -> DVR) to be enabled - this plugin never "
+                "overrides that system-wide switch on its own, only adds "
+                "an extra gate on top of it (Section 7)."
+            ),
+        },
+        {
+            "id": "grace_period_minutes",
+            "label": "Post-air grace period (minutes)",
+            "type": "number",
+            "default": 15,
+            "min": 1,
+            "help_text": (
+                "How long after a recording's scheduled end time to wait "
+                "before treating its catchup window as ready to fetch - "
+                "gives the provider's archive time to finalize the "
+                "broadcast (Section 5)."
+            ),
+        },
+        {
+            "id": "segment_retry_backoff_minutes",
+            "label": "Segment retry backoff (minutes)",
+            "type": "number",
+            "default": 15,
+            "min": 1,
+            "help_text": (
+                "Minimum time between retry attempts on a failed segment "
+                "fetch (5 attempts total, hardcoded) - spaces retries out "
+                "so the cap doesn't exhaust itself before a slow provider "
+                "finishes archiving the window (Section 9)."
+            ),
+        },
+    ]
 
     actions = [
         {
